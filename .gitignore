@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-server/
+release/
+*.local
+.DS_Store
+dist-hermes
+integrations/hermes/harness
+integrations/hermes/dashboard/ui
+integrations/hermes/**/__pycache__
+.hb-test-data
+*.log
+diag*.txt
+.env
+.env.*
+.claude/

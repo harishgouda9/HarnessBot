@@ -1,0 +1,33 @@
+manifest_version: 2
+api_version: 1
+name: harnessbot
+version: 0.1.0
+description: >-
+  The full HarnessBot product inside Hermes: roster, rooms, skills, computer,
+  settings — a sidebar entry and a /harnessbot page in Desktop, plus a dashboard
+  tab and `hermes harnessbot` on the CLI.
+author: HarnessBot
+license: Apache-2.0
+homepage: https://github.com/harnessbot/harnessbot
+tags: [dashboard, agents, ui]
+kind: standalone
+
+config_schema:
+  port:
+    type: int
+    default: 8799
+    description: >-
+      Loopback port for the HarnessBot harness. Never published: the harness has no
+      authentication of its own and is reached only through the dashboard's
+      authenticated plugin router.
+  app_dir:
+    type: str
+    default: ""
+    description: >-
+      Where the built HarnessBot artifact lives. Defaults to <hermes home>/harnessbot.
+  data_dir:
+    type: str
+    default: ""
+    description: >-
+      Where HarnessBot keeps bots, messages and memory. Defaults to
+      <hermes home>/harnessbot-data.

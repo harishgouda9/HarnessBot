@@ -1,0 +1,13 @@
+{
+  "name": "harnessbot",
+  "label": "HarnessBot",
+  "description": "A roster of agent contacts — models, memory, tasks, approvals and rooms — running on this machine.",
+  "icon": "Users",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/harnessbot",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

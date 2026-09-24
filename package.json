@@ -1,0 +1,89 @@
+{
+  "name": "harnessbot",
+  "version": "0.1.44",
+  "private": true,
+  "description": "Local-first desktop chat app where every contact is a real AI agent.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "node --experimental-strip-types server/index.ts",
+    "dev:all": "node scripts/dev-all.mjs",
+    "dev:desktop": "electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.desktop.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint server src scripts",
+    "check:contrast": "node scripts/check-skin-contrast.mjs",
+    "i18n:check": "node --experimental-strip-types scripts/i18n-check.mjs",
+    "check:electron": "node --check electron/main.mjs && node --check electron/preload.cjs",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "build:server": "node scripts/bundle-server.mjs",
+    "build:hermes-plugin": "node scripts/build-hermes-plugin.mjs",
+    "install:hermes-plugin": "node scripts/install-hermes-plugin.mjs",
+    "mcp": "node scripts/mcp-server.mjs",
+    "package:mac": "electron-builder --mac",
+    "package:win": "electron-builder --win",
+    "package:linux": "electron-builder --linux",
+    "clean": "node scripts/clean.mjs",
+    "test:packaged-server": "node --experimental-strip-types scripts/smoke-packaged-server.mjs",
+    "verify": "npm run typecheck && npm run test && npm run check:contrast && npm run i18n:check && npm run check:electron"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.0.0",
+    "oxlint": "^1.80.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.1.0",
+    "vitest": "^4.0.0"
+  },
+  "build": {
+    "appId": "com.harnessbot.app",
+    "productName": "HarnessBot",
+    "files": [
+      "electron/**",
+      "dist/**",
+      "dist-server/**"
+    ],
+    "extraResources": [
+      "skills"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "AppImage"
+      ],
+      "category": "Utility"
+    }
+  }
+}

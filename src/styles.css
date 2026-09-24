@@ -1,0 +1,419 @@
+@import 'tailwindcss';
+
+/*
+ * Skins are blocks of custom properties under [data-skin=...], never :root[data-skin],
+ * so the picker can paint a live miniature by scoping a subtree instead of faking a
+ * screenshot (HB-UIUX-001 s5.3).
+ *
+ * @theme carries the Midnight values so the app is never unstyled before a skin
+ * applies. The first-run product default is White.
+ */
+
+@theme {
+  --color-app: #070707;
+  --color-panel: #111111;
+  --color-raised: #2f2f2f;
+  --color-card: #262626;
+  --color-inset: #191919;
+  --color-ink: #fcfcfc;
+  --color-ink-secondary: #fcfcfc99;
+  --color-accent: #1084fe;
+  --color-accent-ink: #ffffff;
+  --color-accent-border: #459ffe;
+  --color-focus: #459ffe;
+  --color-bubble-user: #5a5a5a;
+  --color-bubble-ink: #fcfcfc;
+  --color-success: #38d591;
+  --color-danger: #ff5667;
+  --color-warning: #ff9800;
+  --color-hairline: #ffffff1f;
+
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-skin='midnight'] {
+  --color-app: #070707;
+  --color-panel: #111111;
+  --color-raised: #2f2f2f;
+  --color-card: #262626;
+  --color-inset: #191919;
+  --color-ink: #fcfcfc;
+  --color-ink-secondary: #fcfcfc99;
+  --color-accent: #1084fe;
+  /* Deliberately weaker than AA. Grok-sampled and kept on purpose; every other skin
+     clears AA, and the contrast check knows about this one exception. */
+  --color-accent-ink: #ffffff;
+  --color-accent-border: #459ffe;
+  --color-focus: #459ffe;
+  --color-bubble-user: #5a5a5a;
+  --color-bubble-ink: #fcfcfc;
+  --color-success: #38d591;
+  --color-danger: #ff5667;
+  --color-warning: #ff9800;
+  --color-hairline: #ffffff1f;
+}
+
+[data-skin='white'] {
+  --color-app: #eceef1;
+  --color-panel: #f7f8fa;
+  --color-raised: #ffffff;
+  --color-card: #ffffff;
+  --color-inset: #e3e6ea;
+  --color-ink: #14181d;
+  --color-ink-secondary: #4a5560;
+  --color-accent: #1c5fa8;
+  --color-accent-ink: #ffffff;
+  --color-accent-border: #1c5fa8;
+  --color-focus: #1c5fa8;
+  --color-bubble-user: #1c5fa8;
+  --color-bubble-ink: #ffffff;
+  --color-success: #0f7a4a;
+  --color-danger: #b3261e;
+  --color-warning: #8a5000;
+  --color-hairline: #14181d1f;
+}
+
+[data-skin='atelier'] {
+  --color-app: #f5f1eb;
+  --color-panel: #efe9e0;
+  --color-raised: #fffdf9;
+  --color-card: #fffdf9;
+  --color-inset: #e6ded1;
+  --color-ink: #221c14;
+  --color-ink-secondary: #55483a;
+  --color-accent: #a05f25;
+  --color-accent-ink: #ffffff;
+  --color-accent-border: #a05f25;
+  --color-focus: #7d4a1c;
+  --color-bubble-user: #a05f25;
+  --color-bubble-ink: #ffffff;
+  --color-success: #1f6b3d;
+  --color-danger: #a3251c;
+  --color-warning: #7a4d00;
+  --color-hairline: #221c141f;
+}
+
+[data-skin='foundry'] {
+  --color-app: #100e0b;
+  --color-panel: #191512;
+  --color-raised: #2b2520;
+  --color-card: #221d19;
+  --color-inset: #151210;
+  --color-ink: #f4efe6;
+  --color-ink-secondary: #c3b8a6;
+  --color-accent: #d99a3e;
+  /* Brass is a light fill: its label has to be dark to clear AA. */
+  --color-accent-ink: #100e0b;
+  --color-accent-border: #d99a3e;
+  --color-focus: #e8b25c;
+  --color-bubble-user: #3a322a;
+  --color-bubble-ink: #f4efe6;
+  --color-success: #6fd39a;
+  --color-danger: #ff8b7a;
+  --color-warning: #ffb74d;
+  --color-hairline: #f4efe61f;
+}
+
+[data-skin='lagoon'] {
+  --color-app: #dfeceb;
+  --color-panel: #eaf4f3;
+  --color-raised: #ffffff;
+  --color-card: #ffffff;
+  --color-inset: #cfe2e0;
+  --color-ink: #10201f;
+  --color-ink-secondary: #415654;
+  --color-accent: #11736d;
+  --color-accent-ink: #ffffff;
+  --color-accent-border: #11736d;
+  --color-focus: #0b5a55;
+  --color-bubble-user: #11736d;
+  --color-bubble-ink: #ffffff;
+  --color-success: #0f6b45;
+  --color-danger: #ad2a20;
+  --color-warning: #7a4b00;
+  --color-hairline: #10201f1f;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-app);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Hairlines, not shadows: a shadow-only separator disappears on the light skins. */
+.hairline {
+  border-color: var(--color-hairline);
+}
+
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-hairline);
+  border-radius: 12px;
+}
+
+/* Motion is short and stepped. Reduced-motion drops it entirely. */
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/*
+ * A settled bot reply lands as one piece rather than being typed out. The slightly
+ * longer curve is deliberate: the mascot did the working, so the reply should read as
+ * arriving, not as still being produced (HB-UIUX-001 s8).
+ */
+@keyframes reply-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+/*
+ * A jump target. Scrolling to a message is not enough on a wall of them — the eye
+ * needs telling which one, and a ring that fades says it without moving the layout.
+ */
+@keyframes flash-in {
+  0% {
+    box-shadow: 0 0 0 3px var(--color-accent-border);
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+.anim-reply {
+  animation: reply-in 520ms var(--ease-out-expo);
+}
+
+.anim-drawer {
+  animation: drawer-in 240ms var(--ease-out-expo);
+}
+.anim-flash {
+  animation: flash-in 1500ms ease-out;
+}
+
+.anim-msg {
+  animation: msg-in 180ms var(--ease-out-expo);
+}
+.anim-panel {
+  animation: panel-in 240ms var(--ease-out-expo);
+}
+.anim-pop {
+  animation: pop-in 200ms var(--ease-out-expo);
+}
+.status-pulse {
+  animation: status-pulse 1.6s steps(2, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-msg,
+  .anim-panel,
+  .anim-pop,
+  .anim-reply,
+  .anim-drawer,
+  .status-pulse {
+    animation: none;
+  }
+  /* The jump target still needs to be findable, so it holds the ring instead of fading it. */
+  .anim-flash {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--color-accent-border);
+  }
+}
+
+/* Resize grips: a real hit target, invisible until you reach for it. */
+.resize-grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 10;
+}
+.resize-grip.start {
+  right: auto;
+  left: -3px;
+}
+.resize-grip.row {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 10;
+}
+.resize-grip::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--color-accent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.resize-grip.row::after {
+  inset: 2px 24%;
+}
+.resize-grip:hover::after,
+.resize-grip.active::after {
+  opacity: 0.7;
+}
+
+.scroll-thin::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--color-hairline);
+  border-radius: 8px;
+}
+
+/* Chat markdown. Wide content scrolls inside itself; the page never scrolls sideways. */
+.md > * + * {
+  margin-top: 0.6em;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-weight: 650;
+  line-height: 1.25;
+}
+.md h1 {
+  font-size: 1.25em;
+}
+.md h2 {
+  font-size: 1.12em;
+}
+.md h3 {
+  font-size: 1em;
+}
+.md ul,
+.md ol {
+  padding-left: 1.3em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--color-inset);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.md pre {
+  background: var(--color-inset);
+  padding: 0.75em;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+}
+.md a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.md blockquote {
+  border-left: 3px solid var(--color-hairline);
+  padding-left: 0.8em;
+  color: var(--color-ink-secondary);
+}
+.md table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.md th,
+.md td {
+  border: 1px solid var(--color-hairline);
+  padding: 0.35em 0.6em;
+}
+
+.spoiler {
+  background: var(--color-ink);
+  color: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.spoiler.revealed {
+  background: none;
+  color: inherit;
+}
