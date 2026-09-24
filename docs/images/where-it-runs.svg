@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">HarnessBot is a plugin inside Hermes</title>
+  <desc id="desc">Hermes Agent hosts the HarnessBot plugin. Each bot can run on Claude, Codex, Grok, or Hermes.</desc>
+  <rect width="1200" height="560" rx="24" fill="#f4f1eb"/>
+  <text x="64" y="72" fill="#8a8175" font-family="Georgia, serif" font-size="15" letter-spacing="3">WHERE IT RUNS</text>
+  <text x="64" y="118" fill="#1c1915" font-family="Georgia, serif" font-size="36">A plugin inside Hermes</text>
+  <rect x="64" y="168" width="1072" height="168" rx="18" fill="#1c1915"/>
+  <text x="96" y="214" fill="#c4b8a8" font-family="Georgia, serif" font-size="14" letter-spacing="2">HERMES AGENT</text>
+  <text x="96" y="262" fill="#f7f4ef" font-family="Georgia, serif" font-size="32">HarnessBot</text>
+  <text x="96" y="298" fill="#d9d0c4" font-family="Calibri, Segoe UI, sans-serif" font-size="18">Roster, rooms, computer use, and the team map</text>
+  <rect x="760" y="214" width="312" height="76" rx="12" fill="#f4f1eb"/>
+  <text x="784" y="246" fill="#8a8175" font-family="Calibri, Segoe UI, sans-serif" font-size="13" letter-spacing="1.5">PLUGIN</text>
+  <text x="784" y="272" fill="#1c1915" font-family="Calibri, Segoe UI, sans-serif" font-size="18">Sidebar, page, and CLI</text>
+  <text x="64" y="392" fill="#8a8175" font-family="Calibri, Segoe UI, sans-serif" font-size="14" letter-spacing="2">BOTS RUN ON</text>
+  <g font-family="Calibri, Segoe UI, sans-serif" font-size="22" fill="#1c1915">
+    <rect x="64" y="412" width="248" height="80" rx="14" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="188" y="460" text-anchor="middle">Claude</text>
+    <rect x="332" y="412" width="248" height="80" rx="14" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="456" y="460" text-anchor="middle">Codex</text>
+    <rect x="600" y="412" width="248" height="80" rx="14" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="724" y="460" text-anchor="middle">Grok</text>
+    <rect x="868" y="412" width="268" height="80" rx="14" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="1002" y="460" text-anchor="middle">Hermes</text>
+  </g>
+</svg>

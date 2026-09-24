@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Computer use</title>
+  <desc id="desc">Opt in, the bot takes a screenshot, then you approve actions on the real computer.</desc>
+  <rect width="1200" height="360" rx="24" fill="#f4f1eb"/>
+  <text x="64" y="68" fill="#8a8175" font-family="Georgia, serif" font-size="15" letter-spacing="3">COMPUTER USE</text>
+  <text x="64" y="112" fill="#1c1915" font-family="Georgia, serif" font-size="32">Hands only after you say so</text>
+  <g font-family="Calibri, Segoe UI, sans-serif">
+    <rect x="64" y="156" width="320" height="140" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <circle cx="108" cy="226" r="22" fill="#1c1915"/>
+    <circle cx="108" cy="226" r="8" fill="#f4f1eb"/>
+    <text x="148" y="214" fill="#1c1915" font-size="24">Opt in</text>
+    <text x="148" y="244" fill="#6e675f" font-size="15">This computer, this bot</text>
+    <rect x="440" y="156" width="320" height="140" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <rect x="468" y="196" width="56" height="40" rx="6" fill="none" stroke="#1c1915" stroke-width="2"/>
+    <path d="M476 220h40M476 228h24" stroke="#c45c26" stroke-width="2"/>
+    <text x="544" y="214" fill="#1c1915" font-size="24">Screenshot</text>
+    <text x="544" y="244" fill="#6e675f" font-size="15">Look, then click</text>
+    <rect x="816" y="156" width="320" height="140" rx="16" fill="#1c1915"/>
+    <path d="M856 226l10 10 20-22" fill="none" stroke="#f4f1eb" stroke-width="3"/>
+    <text x="908" y="214" fill="#f7f4ef" font-size="24">You approve</text>
+    <text x="908" y="244" fill="#d9d0c4" font-size="15">Real keyboard and mouse</text>
+  </g>
+</svg>

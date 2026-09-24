@@ -1,12 +1,12 @@
 # HarnessBot
 
-A local-first desktop chat app where every contact is a real AI agent — with its own
-model, memory, computer, connected apps, and voice.
+Open-source alternative to Grokbot. It works as a plugin inside Hermes Agent, and
+each bot can run on Claude, Codex, Grok, or Hermes.
 
-HarnessBot is an open-source take on the "AI as a messaging app" idea: a roster of
-named bots instead of one assistant that forgets who it is. It is **not affiliated
-with xAI**, it has **no token and no cryptocurrency**, and nothing is behind a
-paywall. Apache-2.0.
+One assistant that forgets who it is is the thing this replaces. You get a roster of
+named bots — computer use, a team map, rooms, and memory — on your machine. It is
+**not affiliated with xAI**, it has **no token and no cryptocurrency**, and nothing
+is behind a paywall. Apache-2.0.
 
 ```
 pnpm install
@@ -20,37 +20,38 @@ them, and it does not ask you to create an account.
 
 ## Features and benefits
 
-Each bot is a named contact, not a blank chat box. It keeps its own model, memory,
-working folder, and tool grants. You stay on this machine: the harness binds to
-loopback and does not ask for an account.
+HarnessBot is the open-source Grokbot alternative that lives where you already work.
+Install it as a plugin inside Hermes and you get the full product: a sidebar entry,
+a `/harnessbot` page, and `hermes harnessbot` on the command line. The same bots
+also run on Claude, Codex, and Grok. Nothing is sent to an account HarnessBot owns.
 
-![HarnessBot connects a roster, chat, a team map, and a computer](docs/images/features.jpg)
+![HarnessBot as a plugin inside Hermes, with bots on Claude, Codex, Grok, and Hermes](docs/images/where-it-runs.svg)
 
-| Benefit | What you get |
+| | What you get |
 | --- | --- |
-| **Private** | Your chats, memory, and approvals stay on this computer. HarnessBot uses the agent CLIs you already signed in. |
-| **Named** | Every bot has a persona, a model, and a memory you can read and correct. Switching engines does not merge them into one assistant. |
-| **Hands** | A bot can use a desktop only after you place one and, for this computer, opt in. You can take the wheel back. |
-| **Teams** | Rooms, @mentions, and a team map let bots ask each other or hand work off, with the exchange visible to you. |
+| **Inside Hermes** | The plugin starts the harness on that machine. Desktop, dashboard, and CLI all open the same roster. |
+| **Your engines** | Point a bot at Claude, Codex, Grok, or Hermes. HarnessBot does not replace the CLI you already pay for. |
+| **Computer use** | A desktop only after you place one and opt in. Screenshot first, then click. You can take the wheel back. |
+| **Team map** | Reporting lines, peers, and handoffs you draw. Open a bot’s chat from the map without leaving it. |
 
-![You, the harness, the agent, and the reply](docs/images/message-flow.jpg)
+![A roster with computer use, a team map, and rooms](docs/images/features.svg)
+
+![A message goes through the harness to an engine and streams back](docs/images/message-flow.svg)
 
 A turn is four steps:
 
 1. **Message.** You write in that bot’s chat, or mention it in a room.
-2. **Route.** The harness picks the bot’s engine, folder, and only the tools that bot is allowed to use.
-3. **Model.** Claude, Grok, Hermes, or another connected CLI does the work.
-4. **Stream.** The reply, tool activity, and any approval card come back into the same thread.
+2. **Harness.** The plugin’s harness picks the engine, the folder, and only the tools that bot may use.
+3. **Engine.** Claude, Codex, Grok, or Hermes does the work.
+4. **Reply.** Text, tool activity, and any approval card stream back into the same thread.
 
-![Opt in, then a screenshot, then your approval](docs/images/computer-use.jpg)
+![Opt in, screenshot, then you approve](docs/images/computer-use.svg)
 
-Desktop use is a separate choice from chat:
+Computer use stays a separate choice from chat:
 
-1. **Opt in.** Pick This computer and confirm that this bot may use the real screen, keyboard, and mouse.
-2. **Screenshot.** The bot looks first, then clicks, types, or opens a page with the desktop tools.
-3. **You approve.** Actions on the real computer ask in the chat. Opening a site is not signing in: the bot stops at a login wall instead of typing a password or a one-time code.
-
-![Private, named bots, hands, and teams](docs/images/benefits.jpg)
+1. **Opt in.** Choose This computer and confirm that this bot may use the real screen, keyboard, and mouse.
+2. **Screenshot.** The bot looks first, then clicks, types, or opens a page.
+3. **You approve.** Actions on the real computer ask in the chat. Opening a site is not signing in. The bot stops at a login wall instead of typing a password or a one-time code.
 
 ## What it actually does
 

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">How a message moves</title>
+  <desc id="desc">You send a message, the harness routes it, the engine answers, and the reply streams back.</desc>
+  <rect width="1200" height="320" rx="24" fill="#f4f1eb"/>
+  <text x="64" y="64" fill="#8a8175" font-family="Georgia, serif" font-size="15" letter-spacing="3">A TURN</text>
+  <g font-family="Calibri, Segoe UI, sans-serif">
+    <rect x="64" y="96" width="230" height="148" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="88" y="140" fill="#c45c26" font-size="14" letter-spacing="1.5">01</text>
+    <text x="88" y="178" fill="#1c1915" font-size="26">Message</text>
+    <text x="88" y="208" fill="#6e675f" font-size="15">You, in that chat</text>
+    <rect x="338" y="96" width="230" height="148" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="362" y="140" fill="#c45c26" font-size="14" letter-spacing="1.5">02</text>
+    <text x="362" y="178" fill="#1c1915" font-size="26">Harness</text>
+    <text x="362" y="208" fill="#6e675f" font-size="15">Engine and tools</text>
+    <rect x="612" y="96" width="230" height="148" rx="16" fill="#1c1915"/>
+    <text x="636" y="140" fill="#e7b89a" font-size="14" letter-spacing="1.5">03</text>
+    <text x="636" y="178" fill="#f7f4ef" font-size="26">Engine</text>
+    <text x="636" y="208" fill="#d9d0c4" font-size="15">Claude, Codex, Grok</text>
+    <rect x="886" y="96" width="250" height="148" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="910" y="140" fill="#c45c26" font-size="14" letter-spacing="1.5">04</text>
+    <text x="910" y="178" fill="#1c1915" font-size="26">Reply</text>
+    <text x="910" y="208" fill="#6e675f" font-size="15">Streamed into chat</text>
+  </g>
+  <path d="M294 170h44M568 170h44M842 170h44" stroke="#c45c26" stroke-width="2" fill="none"/>
+  <path d="M330 170l-8-6v12zM604 170l-8-6v12zM878 170l-8-6v12z" fill="#c45c26"/>
+</svg>

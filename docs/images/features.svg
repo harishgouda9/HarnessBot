@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">What you get instead of one Grokbot</title>
+  <desc id="desc">Named bots, computer use, a team map, and rooms, on your machine.</desc>
+  <rect width="1200" height="420" rx="24" fill="#f4f1eb"/>
+  <text x="64" y="68" fill="#8a8175" font-family="Georgia, serif" font-size="15" letter-spacing="3">INSTEAD OF ONE BOT</text>
+  <text x="64" y="114" fill="#1c1915" font-family="Georgia, serif" font-size="32">A roster, with hands and a map</text>
+  <g font-family="Calibri, Segoe UI, sans-serif">
+    <rect x="64" y="160" width="250" height="196" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="88" y="208" fill="#c45c26" font-size="13" letter-spacing="1.4">PRIVATE</text>
+    <text x="88" y="252" fill="#1c1915" font-size="26">On this</text>
+    <text x="88" y="284" fill="#1c1915" font-size="26">machine</text>
+    <rect x="338" y="160" width="250" height="196" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="362" y="208" fill="#c45c26" font-size="13" letter-spacing="1.4">COMPUTER USE</text>
+    <text x="362" y="252" fill="#1c1915" font-size="26">Opt-in</text>
+    <text x="362" y="284" fill="#1c1915" font-size="26">desktop</text>
+    <rect x="612" y="160" width="250" height="196" rx="16" fill="#1c1915"/>
+    <text x="636" y="208" fill="#e7b89a" font-size="13" letter-spacing="1.4">TEAM MAP</text>
+    <text x="636" y="252" fill="#f7f4ef" font-size="26">Who reports</text>
+    <text x="636" y="284" fill="#f7f4ef" font-size="26">to whom</text>
+    <rect x="886" y="160" width="250" height="196" rx="16" fill="#ffffff" stroke="#e4ddd3"/>
+    <text x="910" y="208" fill="#c45c26" font-size="13" letter-spacing="1.4">ROOMS</text>
+    <text x="910" y="252" fill="#1c1915" font-size="26">Bots that</text>
+    <text x="910" y="284" fill="#1c1915" font-size="26">hand work off</text>
+  </g>
+</svg>
