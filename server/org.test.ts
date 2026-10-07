@@ -69,6 +69,8 @@ describe('org links', () => {
 
     const graph = orgGraph();
     expect(graph.nodes.find((n) => n.id === report.id)!.reportsTo).toBe(manager.id);
+    const shaped = makeBot('Shaped', { avatarShape: 'shield' });
+    expect(orgGraph().nodes.find((n) => n.id === shaped.id)!.avatarShape).toBe('shield');
     // The spine is never duplicated into the link list.
     expect(graph.links.some((l) => l.from === manager.id && l.to === report.id)).toBe(false);
   });

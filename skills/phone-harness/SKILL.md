@@ -18,7 +18,9 @@ already accepted this computer's debugging key.
   screen; assuming a tap landed is how you end up three screens deep in the wrong app.
 - Prefer text entry over coordinate taps where an element has a resource id.
 - Never accept a payment, send a message, or delete data without asking first. A
-  phone is somebody's actual phone.
+  phone is somebody's actual phone. The harness refuses send, pay, and delete
+  until the user records an explicit approval. Do not treat a missing approval
+  as a yes, and do not invent a connected device when adb shows none.
 - If the screen looks unfamiliar, stop and describe what you see rather than tapping
   to find your way out.
 - Coordinates are device-specific. Re-derive them from the current screenshot every

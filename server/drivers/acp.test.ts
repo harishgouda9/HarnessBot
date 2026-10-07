@@ -1,7 +1,9 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { defineAcpDriver, mcpServersFor, mergeCatalog, readAcpModels } from './acp.ts';
+import { acpModelLabel, defineAcpDriver, mcpServersFor, mergeCatalog, readAcpModels } from './acp.ts';
 import { EventBus, recordEvents } from '../harness/bus.ts';
 import type { DriverContext, RuntimeEvent, SendTurnInput } from '../contracts.ts';
 
@@ -99,6 +101,48 @@ describe('ACP driver contract', () => {
       usage: { input: 30, output: 4, cachedInput: 8 },
     });
     await adapter.dispose();
+  });
+
+  it('writes a pipeline file in the shared workspace and refuses one outside it', async () => {
+    const inside = path.join(process.env.HB_DATA_DIR!, 'workspace', 'pipe', 'runbook.md');
+    const bus = new EventBus();
+    const recorder = recordEvents(bus);
+    const { ctx, env } = contextFor(bus, 'write-file');
+    env.FAKE_ACP_WRITE = inside;
+    const adapter = await driver.create({ command: FAKE_ACP, env }, ctx);
+    await adapter.sendTurn(turn('write the runbook'));
+    expect(deltas(recorder.events)).toContain('wrote');
+    expect(fs.readFileSync(inside, 'utf8')).toBe('runbook\n');
+    const wrote = recorder.events.find((e) => e.type === 'item.completed' && 'toolName' in e && e.toolName === 'Write');
+    expect(wrote).toMatchObject({ ok: true, title: expect.stringMatching(/runbook\.md \(8 bytes\)/) });
+    await adapter.dispose();
+
+    const outside = path.join(process.env.HB_DATA_DIR!, 'secrets', 'nope.txt');
+    const bus2 = new EventBus();
+    const rec2 = recordEvents(bus2);
+    const second = contextFor(bus2, 'write-file');
+    second.env.FAKE_ACP_WRITE = outside;
+    const adapter2 = await driver.create({ command: FAKE_ACP, env: second.env }, second.ctx);
+    await adapter2.sendTurn(turn('write outside'));
+    expect(deltas(rec2.events)).toContain('write failed');
+    expect(fs.existsSync(outside)).toBe(false);
+    await adapter2.dispose();
+
+    // The session desk falls back to the home directory. That must not become a silent write root.
+    const homeFile = path.join(os.homedir(), `.hb-fs-probe-${process.pid}.txt`);
+    const bus3 = new EventBus();
+    const rec3 = recordEvents(bus3);
+    const third = contextFor(bus3, 'write-file');
+    third.env.FAKE_ACP_WRITE = homeFile;
+    const adapter3 = await driver.create({ command: FAKE_ACP, env: third.env }, third.ctx);
+    try {
+      await adapter3.sendTurn(turn('write home', { cwd: os.homedir() }));
+      expect(deltas(rec3.events)).toContain('write failed');
+      expect(fs.existsSync(homeFile)).toBe(false);
+    } finally {
+      await adapter3.dispose();
+      fs.rmSync(homeFile, { force: true });
+    }
   });
 
   it('reuses one session across turns instead of starting over each time', async () => {
@@ -311,7 +355,10 @@ describe('ACP driver contract', () => {
         ],
       },
     });
-    expect(listed.map((m) => m.label)).toEqual(['opencode-free · Nemotron', 'openrouter · Claude']);
+    expect(listed.map((m) => m.label)).toEqual(['Nemotron', 'Claude']);
+    expect(
+      acpModelLabel('openai-codex:gpt-5.4', 'ChatGPT or Codex Subscription · gpt-5.4'),
+    ).toBe('gpt-5.4');
     expect(mergeCatalog([{ id: 'default', label: 'As configured', default: true }], listed).map((m) => m.id)).toEqual([
       'opencode-free:nemotron',
       'openrouter:anthropic/claude',
@@ -328,6 +375,63 @@ describe('ACP driver contract', () => {
     await adapter.sendTurn(turn('hello', { model: 'openrouter:anthropic/claude' }));
     expect(deltas(recorder.events)).toContain('model:openrouter:anthropic/claude');
     await adapter.dispose();
+  });
+
+  it('switches each session, including one whose catalogue default already matches the pick', async () => {
+    const bus = new EventBus();
+    const recorder = recordEvents(bus);
+    const adapter = await adapterFor(bus, 'models');
+    // Opens on the advertised model (nemotron) and does not call set_model.
+    await adapter.sendTurn(turn('boot', { threadId: 'b', model: 'default' }));
+    await adapter.sendTurn(turn('one', { threadId: 'a', model: 'openrouter:anthropic/claude' }));
+    // The catalogue default is now claude. Session b is still the model it opened on.
+    await adapter.sendTurn(turn('two', { threadId: 'b', model: 'openrouter:anthropic/claude' }));
+
+    const text = deltas(recorder.events);
+    expect(text).toContain('pong: boot');
+    expect(text).toContain('model:openrouter:anthropic/claude');
+    expect(text).not.toMatch(/pong: two/);
+    expect(text).toContain('model:openrouter:anthropic/claude two');
+    await adapter.dispose();
+  });
+
+  it('sends a provider change the catalogue has not listed, and retries after a refusal', async () => {
+    const hermes = defineAcpDriver({
+      kind: 'hermes',
+      displayName: 'Hermes',
+      bin: 'hermes',
+      acpArgs: [],
+      models: [{ id: 'default', label: 'As configured', default: true }],
+      capabilities: { queueing: true },
+    });
+    const bus = new EventBus();
+    const recorder = recordEvents(bus);
+    const { ctx, env } = contextFor(bus, 'models');
+    const adapter = await hermes.create(
+      { command: FAKE_ACP, env },
+      { ...ctx, instanceId: 'hermes-switch', emit: (event) => bus.publish('hermes', event) },
+    );
+    await adapter.sendTurn(turn('hello', { threadId: 'h', model: 'openai-codex:gpt-6-luna' }));
+    expect(deltas(recorder.events)).toContain('model:openai-codex:gpt-6-luna');
+    await adapter.sendTurn(turn('again', { threadId: 'h', model: 'openrouter:anthropic/claude-haiku-4.5' }));
+    expect(deltas(recorder.events)).toContain('model:openrouter:anthropic/claude-haiku-4.5');
+    await adapter.dispose();
+
+    const refused = new EventBus();
+    const refusedEvents = recordEvents(refused);
+    const refusedCtx = contextFor(refused, 'reject-model');
+    const stuck = await hermes.create(
+      { command: FAKE_ACP, env: refusedCtx.env },
+      { ...refusedCtx.ctx, instanceId: 'hermes-refuse', emit: (event) => refused.publish('hermes', event) },
+    );
+    await stuck.sendTurn(turn('nope', { threadId: 'r', model: 'openai-codex:gpt-6-luna' }));
+    await stuck.sendTurn(turn('nope-again', { threadId: 'r', model: 'openai-codex:gpt-6-luna' }));
+    const errors = refusedEvents.events.filter((e) => e.type === 'runtime.error');
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining('Could not switch to openai-codex:gpt-6-luna') });
+    expect(deltas(refusedEvents.events)).toContain('pong: nope');
+    expect(deltas(refusedEvents.events)).toContain('pong: nope-again');
+    await stuck.dispose();
   });
 });
 

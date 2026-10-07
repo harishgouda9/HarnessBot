@@ -89,6 +89,43 @@ export function modelProvider(modelId: string): string | undefined {
   return cut > 0 ? modelId.slice(0, cut) : undefined;
 }
 
+/**
+ * The name a picker row should show.
+ *
+ * Hermes inventory labels look like `openai-codex · ChatGPT or Codex Subscription · gpt-5.4`.
+ * A single-line truncate keeps the provider prefix and clips the model id, so every row
+ * looks the same. The id after the colon is what distinguishes them.
+ */
+export function visibleModelName(modelId: string, label: string): string {
+  const cut = modelId.indexOf(':');
+  const modelPart = (cut > 0 ? modelId.slice(cut + 1) : modelId).trim() || modelId;
+  const trimmed = label.trim();
+  if (!trimmed || trimmed === modelId) return modelPart;
+  const sep = trimmed.lastIndexOf(' · ');
+  if (sep < 0) return trimmed;
+  const tail = trimmed.slice(sep + 3).trim();
+  if (!tail || /[.…]$/.test(tail)) return modelPart;
+  if (tail.toLowerCase() === modelPart.toLowerCase()) return tail;
+  if (tail.length <= 64) return tail;
+  return modelPart;
+}
+
+/**
+ * Name for the header and the composer button.
+ *
+ * Picker rows can stay short because the provider is already a group heading.
+ * The chrome has no heading, and a long subscription label truncates before the
+ * model id, so every pin looks like the same provider. Show `provider · model`.
+ */
+export function chromeModelName(modelId: string, label?: string): string {
+  const provider = modelProvider(modelId);
+  let name = modelId;
+  if (label !== undefined) name = visibleModelName(modelId, label);
+  else if (provider) name = modelId.slice(modelId.indexOf(':') + 1);
+  if (!provider) return name || modelId;
+  return `${provider} · ${name}`;
+}
+
 export function currentModelLabel(
   selection: { instanceId: string; model: string } | undefined,
   instances: CatalogEngine[],
@@ -98,6 +135,6 @@ export function currentModelLabel(
   const model = instance?.models.find((m) => m.id === selection.model);
   return {
     engine: instance?.displayName ?? selection.instanceId,
-    model: model?.label ?? selection.model,
+    model: model ? chromeModelName(model.id, model.label) : chromeModelName(selection.model),
   };
 }

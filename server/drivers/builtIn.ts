@@ -236,6 +236,18 @@ export function grokBuildArgs({ input, resume }: BuildArgsInput): string[] {
     '--output-format',
     'streaming-messages-json',
     '--no-plan',
+    // Headless mode closes stdin, so a permission prompt is answered as
+    // "User cancelled the execution" in the same second. acceptEdits only adds
+    // an Edit rule; the write tool is the Write class and still prompts.
+    // --allow Edit/Write lets those file tools finish. Shell still asks, and a
+    // closed stdin still cancels a shell call. --always-approve is not the
+    // default: it would skip that shell check for every bot.
+    '--permission-mode',
+    'acceptEdits',
+    '--allow',
+    'Edit',
+    '--allow',
+    'Write',
     '-m',
     grokModelId(input.model),
     ...(input.cwd ? ['--cwd', input.cwd] : []),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clip, clipList, estimateTokens, isQuickTurn, pickRelevant, pickSmallerModel, PROMPT_LIMITS, LEAN_LIMITS, limitsFor } from './prompt-budget.ts';
+import { clip, clipList, estimateTokens, isQuickTurn, pickRelevant, pickSmallerModel, resolveTurnModel, PROMPT_LIMITS, LEAN_LIMITS, limitsFor } from './prompt-budget.ts';
 
 /**
  * The system prompt is rebuilt every turn, so a section with no ceiling is a bill
@@ -124,5 +124,17 @@ describe('lean', () => {
     expect(pickSmallerModel(models, 'grok-4')).toBe('grok-4-fast');
     expect(pickSmallerModel(models, 'grok-4-fast')).toBeNull();
     expect(pickSmallerModel([{ id: 'grok-4', label: 'Grok 4' }], 'grok-4')).toBeNull();
+  });
+
+  it('does not move a pinned model onto another provider\'s Haiku', () => {
+    const models = [
+      { id: 'openrouter:anthropic/claude-haiku-4.5', label: 'claude-haiku-4.5' },
+      { id: 'openai-codex:gpt-5.4', label: 'gpt-5.4' },
+      { id: 'openai-codex:gpt-5.4-mini', label: 'gpt-5.4-mini' },
+    ];
+    expect(pickSmallerModel(models, 'openai-codex:gpt-5.4')).toBe('openai-codex:gpt-5.4-mini');
+    expect(resolveTurnModel('openai-codex:gpt-5.4', models, false)).toBe('openai-codex:gpt-5.4');
+    expect(resolveTurnModel('openai-codex:gpt-5.4', models, true)).toBe('openai-codex:gpt-5.4-mini');
+    expect(resolveTurnModel('default', models, true)).toBe('default');
   });
 });

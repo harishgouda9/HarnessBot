@@ -1097,8 +1097,10 @@ function VoiceTab({ voice, configured, onSave }: { voice: string; configured: bo
           </p>
         ) : (
           <p className="mt-1">
-            Not shipped on this platform yet. Text to speech works if you add a key; dictation and
-            calls are macOS-only in this version, and the UI will not pretend otherwise.
+            On Windows, the microphone button in the composer uses Windows speech recognition when
+            this session provides it. The words land in the composer and nothing is sent until you
+            press Send. If speech is unavailable, the composer says so and stays as you left it.
+            Calls remain macOS-only.
           </p>
         )}
       </div>
@@ -1166,9 +1168,12 @@ function DecisionLog() {
   const [entries, setEntries] = useState<DecisionLogEntry[] | null>(null);
   const [filter, setFilter] = useState('');
 
-  const shown = (entries ?? []).filter(
-    (entry) => !filter || entry.outcome === filter || (filter === 'local' && entry.approvalScope === 'local-computer'),
-  );
+  const shown = (entries ?? []).filter((entry) => {
+    if (!filter) return true;
+    if (filter === 'local') return entry.approvalScope === 'local-computer';
+    if (filter === 'unattended') return entry.initiatorKind === 'routine' || entry.initiatorKind === 'handoff' || entry.initiatorKind === 'job';
+    return entry.outcome === filter;
+  });
 
   return (
     <Section title="Permission decisions" hint="Written to a rotating log on disk. Nothing here is sent anywhere.">
@@ -1184,7 +1189,7 @@ function DecisionLog() {
       ) : (
         <>
           <div className="mb-2 flex flex-wrap gap-1">
-            {['', 'allowed-once', 'rejected', 'unavailable', 'local'].map((value) => (
+            {['', 'allowed-once', 'rejected', 'unavailable', 'local', 'unattended'].map((value) => (
               <button
                 key={value || 'all'}
                 type="button"
@@ -1192,7 +1197,7 @@ function DecisionLog() {
                 className="rounded-lg px-2 py-1 text-[12px]"
                 style={{ background: filter === value ? 'var(--color-raised)' : 'var(--color-inset)' }}
               >
-                {value === '' ? 'All' : value === 'local' ? 'This computer' : value}
+                {value === '' ? 'All' : value === 'local' ? 'This computer' : value === 'unattended' ? 'Nobody watching' : value}
               </button>
             ))}
           </div>
@@ -1215,7 +1220,8 @@ function DecisionLog() {
                       ) : null}
                       <span className="flex-1" />
                       <span style={{ color: 'var(--color-ink-secondary)' }}>
-                        {entry.source} · {new Date(entry.at).toLocaleString()}
+                        {entry.initiatorKind ?? 'person'}
+                        {entry.initiatorLabel ? ` · ${entry.initiatorLabel}` : ''} · {entry.source} · {new Date(entry.at).toLocaleString()}
                       </span>
                     </div>
                     <div className="truncate" style={{ color: 'var(--color-ink-secondary)' }}>
@@ -1286,9 +1292,77 @@ function TeamExport() {
   );
 }
 
+function DesktopSection() {
+  const [presence, setPresence] = useState<{ tray: boolean; openAtLogin: boolean } | null>(null);
+  const [pkg, setPkg] = useState<{ installer: string; signed: boolean; updateCheck: string; updateSource: string | null } | null>(null);
+  const [backupNote, setBackupNote] = useState('');
+
+  useEffect(() => {
+    void window.hb?.getPresence?.().then(setPresence);
+    void api.get<NonNullable<typeof pkg>>('/api/package-status').then(setPkg).catch(() => setPkg(null));
+  }, []);
+
+  return (
+    <Section title="Desktop" hint="Tray and start-at-login belong to the desktop app. Search, routines, spend caps, backup, and phone approvals work from the harness either way.">
+      {window.hb?.getPresence ? (
+        <>
+          <label className="flex items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              checked={presence?.tray !== false}
+              onChange={(e) => void window.hb?.setPresence?.({ tray: e.target.checked }).then(setPresence)}
+            />
+            Keep HarnessBot in the system tray
+          </label>
+          <label className="mt-2 flex items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              checked={presence?.openAtLogin === true}
+              onChange={(e) => void window.hb?.setPresence?.({ openAtLogin: e.target.checked }).then(setPresence)}
+            />
+            Start when I sign in
+          </label>
+        </>
+      ) : (
+        <p className="text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
+          Open the desktop app to use the system tray and start-at-login. This window is the harness UI.
+        </p>
+      )}
+      {pkg ? (
+        <p className="mt-3 text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
+          Windows package: {pkg.signed ? 'signed' : 'unsigned'}. Update check: {pkg.updateCheck === 'configured' ? pkg.updateSource : 'no source'}.
+        </p>
+      ) : null}
+      <button
+        type="button"
+        className="mt-3 rounded-lg px-3 py-1.5 text-[13px]"
+        style={{ background: 'var(--color-raised)' }}
+        onClick={() => {
+          void api.get<unknown>('/api/backup').then((data) => {
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'harnessbot-backup.json';
+            link.click();
+            URL.revokeObjectURL(url);
+            setBackupNote('Backup downloaded. It leaves out API keys, webhook secrets, and connector credentials.');
+          });
+        }}
+      >
+        Download roster backup
+      </button>
+      {backupNote ? (
+        <p className="mt-2 text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>{backupNote}</p>
+      ) : null}
+    </Section>
+  );
+}
+
 function AdvancedTab({ config, onSave }: { config: PublicConfig; onSave: (p: Record<string, unknown>) => Promise<void> }) {
   return (
     <>
+      <DesktopSection />
       <Section
         title="Lean"
         hint="Cuts what each turn sends: a shorter transcript, only the skills that look relevant, tighter playbooks. Same bot, smaller bill."
@@ -1341,10 +1415,7 @@ function AdvancedTab({ config, onSave }: { config: PublicConfig; onSave: (p: Rec
       </Section>
 
       <Section title="Updates">
-        <select value={config.updates} onChange={(e) => void onSave({ updates: e.target.value })} className="w-full rounded-lg px-2 py-1.5 text-[13px]" style={inputStyle}>
-          <option value="Automatic">Automatic</option>
-          <option value="Manual">Manual</option>
-        </select>
+        <p className="text-[13px]">This build has no update source, so it does not check for or install updates.</p>
       </Section>
 
       <Section title="Experimental" hint="Off by default.">

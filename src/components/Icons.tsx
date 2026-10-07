@@ -189,6 +189,20 @@ const PATHS = {
       <path d="M14 3.5V9h5.5" />
     </>
   ),
+  history: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  flow: (
+    <>
+      <rect x="3.5" y="3.5" width="6" height="5" rx="1.5" />
+      <rect x="14.5" y="9.5" width="6" height="5" rx="1.5" />
+      <rect x="3.5" y="15.5" width="6" height="5" rx="1.5" />
+      <path d="M9.5 6H13a2 2 0 0 1 2 2v1.5M9.5 18H13a2 2 0 0 0 2-2v-1.5" />
+    </>
+  ),
   unlink: (
     <>
       <path d="M9.5 14.5 8 16a3.2 3.2 0 0 1-4.5-4.5L5 10" />

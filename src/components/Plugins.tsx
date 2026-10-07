@@ -4,6 +4,7 @@ import { useStore } from '../store.tsx';
 import { Avatar } from './Avatar.tsx';
 import { Icon } from './Icons.tsx';
 import { McpServersPanel } from './McpServers.tsx';
+import { PageHeader } from './PageHeader.tsx';
 
 /**
  * Connected apps and MCP servers in one place, because from a bot's point of view
@@ -157,11 +158,7 @@ export function PluginsPanel() {
 
   return (
     <div className="flex min-w-0 flex-1 flex-col" style={{ background: 'var(--color-app)' }}>
-      <header className="flex flex-wrap items-center gap-2 border-b px-4 py-2.5 hairline" style={{ background: 'var(--color-panel)' }}>
-        <h1 className="flex items-center gap-2 text-[15px] font-semibold">
-          <Icon name="apps" size={17} />
-          Connected apps
-        </h1>
+      <PageHeader title="Connected apps">
         <span className="flex items-center gap-1 rounded-lg p-0.5" style={{ background: 'var(--color-inset)' }}>
           {(['apps', 'mcp'] as const).map((name) => (
             <button
@@ -180,7 +177,6 @@ export function PluginsPanel() {
             </button>
           ))}
         </span>
-        <span className="flex-1" />
         {tab === 'apps' ? (
           <span className="relative flex items-center">
             <span className="pointer-events-none absolute left-2" style={{ color: 'var(--color-ink-secondary)' }}>
@@ -193,7 +189,7 @@ export function PluginsPanel() {
           <Icon name="chevronLeft" size={13} />
           Back
         </button>
-      </header>
+      </PageHeader>
 
       {error || loadError ? (
         <div className="flex items-start gap-2 px-4 py-1.5 text-[12px]" style={{ color: 'var(--color-danger)' }}>
@@ -312,7 +308,7 @@ export function PluginsPanel() {
                         await refreshBots();
                       }}
                     />
-                    <Avatar name={bot.name} color={bot.color} size={20} />
+                    <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={20} />
                     {bot.name}
                   </label>
                 ))}

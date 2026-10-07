@@ -11,11 +11,14 @@ const mode = process.env.FAKE_ACP_MODE ?? 'text';
 const send = (obj) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...obj })}\n`);
 
 let nextId = 1000;
-let sessionModel = '';
+/** Per session. A global would make a switch on one thread look like it applied to every other. */
+const sessionModel = new Map();
 const sessions = new Set();
 const sessionMounts = new Map();
 /** Permission requests we sent and are still waiting on. */
 const awaitingPermission = new Map();
+/** File writes we sent and are still waiting on. */
+const awaitingWrite = new Map();
 
 const update = (sessionId, u) => send({ method: 'session/update', params: { sessionId, update: u } });
 const chunk = (sessionId, text) =>
@@ -63,6 +66,21 @@ function onPrompt(id, params) {
     return;
   }
 
+  if (mode === 'write-file') {
+    const rpcId = nextId++;
+    awaitingWrite.set(rpcId, { promptId: id, sessionId });
+    send({
+      id: rpcId,
+      method: 'fs/write_text_file',
+      params: {
+        sessionId,
+        path: process.env.FAKE_ACP_WRITE,
+        content: 'runbook\n',
+      },
+    });
+    return;
+  }
+
   if (mode === 'tool') {
     update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'README.md', kind: 'read' });
     update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'call_1', title: 'README.md', kind: 'read', status: 'in_progress' });
@@ -73,7 +91,8 @@ function onPrompt(id, params) {
   }
 
   // Default: echo the prompt back in two chunks, so streaming is observable.
-  chunk(sessionId, sessionModel ? `model:${sessionModel} ` : 'pong: ');
+  const model = sessionModel.get(sessionId) ?? '';
+  chunk(sessionId, model ? `model:${model} ` : 'pong: ');
   chunk(sessionId, text.split('\n').pop() ?? '');
   finishPrompt(id);
 }
@@ -81,6 +100,13 @@ function onPrompt(id, params) {
 function onMessage(msg) {
   // A response to a request we sent (only permissions today).
   if (msg.id !== undefined && msg.method === undefined) {
+    const writing = awaitingWrite.get(msg.id);
+    if (writing) {
+      awaitingWrite.delete(msg.id);
+      chunk(writing.sessionId, msg.error ? 'write failed' : 'wrote');
+      finishPrompt(writing.promptId);
+      return;
+    }
     const waiting = awaitingPermission.get(msg.id);
     if (!waiting) return;
     awaitingPermission.delete(msg.id);
@@ -130,7 +156,11 @@ function onMessage(msg) {
     }
 
     case 'session/set_model':
-      sessionModel = String(msg.params?.modelId ?? '');
+      if (mode === 'reject-model') {
+        send({ id: msg.id, error: { code: -32602, message: 'model refused' } });
+        break;
+      }
+      sessionModel.set(String(msg.params?.sessionId ?? ''), String(msg.params?.modelId ?? ''));
       send({ id: msg.id, result: {} });
       break;
 

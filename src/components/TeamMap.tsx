@@ -664,7 +664,7 @@ export function TeamMapPage() {
                     setPanelOpen(true);
                   }}
                   onOpenChat={() => {
-                    // Stay on the map. Selecting a bot switches the whole window to chat.
+                    // Stay on the map. The chat slides in from the right.
                     setCardMenu(null);
                     dispatch({ type: 'drawer', botId: node.id });
                   }}
@@ -806,6 +806,7 @@ function NodeCard({
           activity={node.activity as never}
           expression={node.mascotExpression}
           avatarUrl={node.avatarUrl}
+          avatarShape={node.avatarShape}
           size={32}
         />
         <div className="min-w-0 flex-1">
@@ -916,7 +917,15 @@ function NodeInspector({
   return (
     <div className="p-3">
       <div className="flex items-center gap-2">
-        <Avatar name={node.name} color={node.color as HarnessbotColor} size={32} />
+        <Avatar
+          name={node.name}
+          color={node.color as HarnessbotColor}
+          activity={node.activity as never}
+          expression={node.mascotExpression}
+          avatarUrl={node.avatarUrl}
+          avatarShape={node.avatarShape}
+          size={32}
+        />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-semibold">{node.name}</div>
           <div className="truncate text-[11px]" style={{ color: 'var(--color-ink-secondary)' }}>

@@ -105,12 +105,46 @@ export function isQuickTurn(text: string, extra?: { attachments?: unknown[]; con
   return true;
 }
 
-/** A cheaper/faster sibling on the same provider, or null if this already is one. */
+/** Provider slug of a Hermes `provider:model` id. A plain id has no provider. */
+function modelProviderId(id: string): string {
+  const cut = id.indexOf(':');
+  return cut > 0 ? id.slice(0, cut).toLowerCase() : '';
+}
+
+/**
+ * A cheaper sibling on the same provider, or null if this already is one.
+ *
+ * Hermes lists every signed-in provider in one catalogue. The first Haiku or Mini
+ * in that list is often a different vendor. A short message must not be moved
+ * onto it: the header would keep the model the user pinned, and the reply would
+ * come from the other account.
+ */
 export function pickSmallerModel(models: { id: string; label: string }[], current: string): string | null {
-  if (!models.length) return null;
+  if (!models.length || !current) return null;
   if (SMALL_MODEL.test(current)) return null;
-  const found = models.find((m) => m.id !== current && SMALL_MODEL.test(`${m.id} ${m.label}`));
+  const provider = modelProviderId(current);
+  const found = models.find((m) => {
+    if (m.id === current) return false;
+    if (modelProviderId(m.id) !== provider) return false;
+    return SMALL_MODEL.test(`${m.id} ${m.label}`);
+  });
   return found?.id ?? null;
+}
+
+/**
+ * The model id a turn should send.
+ *
+ * The pinned id is the one the picker shows. A smaller sibling is used only when
+ * the user turned on "Prefer a smaller model for short messages", and only on
+ * the same provider. `default` leaves the agent on its own config.
+ */
+export function resolveTurnModel(
+  selected: string,
+  models: { id: string; label: string }[],
+  preferSmall: boolean,
+): string {
+  if (!preferSmall || !selected || selected === 'default') return selected;
+  return pickSmallerModel(models, selected) ?? selected;
 }
 
 /** Truncate on a word boundary where one is near, and say that it happened. */

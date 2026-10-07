@@ -35,10 +35,13 @@ function open(): DatabaseSync {
       active_leaf_id TEXT
     );
   `);
-  try {
-    fs.chmodSync(DB_FILE, 0o600);
-  } catch {
-    // Windows has no POSIX mode; the file inherits the user profile ACL instead.
+  // WAL sidecars are created by the schema statements above. Owner-only applies to them too.
+  for (const file of [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`]) {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {
+      // Windows has no POSIX mode; the file inherits the user profile ACL instead.
+    }
   }
   return db;
 }
@@ -177,6 +180,30 @@ export function setActiveLeaf(threadId: ThreadId, leafId: string | null): void {
 export interface SearchHit {
   threadId: ThreadId;
   message: Message;
+}
+
+export interface ThreadTail {
+  threadId: ThreadId;
+  at: number;
+  text: string | null;
+}
+
+/** Newest row of each thread. History uses this instead of loading every transcript. */
+export function latestPerThread(limit = 300): ThreadTail[] {
+  const rows = open()
+    .prepare(
+      `SELECT m.thread_id AS thread_id, m.at AS at, m.text AS text
+       FROM messages m
+       INNER JOIN (
+         SELECT thread_id, MAX(rowid) AS seq
+         FROM messages
+         GROUP BY thread_id
+       ) latest ON latest.thread_id = m.thread_id AND latest.seq = m.rowid
+       ORDER BY m.at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as { thread_id: string; at: number; text: string | null }[];
+  return rows.map((row) => ({ threadId: row.thread_id, at: row.at, text: row.text }));
 }
 
 export function searchMessages(query: string, limit = 100): SearchHit[] {

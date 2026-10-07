@@ -98,6 +98,17 @@ describe('streamEvents', () => {
     stream.close();
   });
 
+  it('records the last event id and requests the resume query it was given', async () => {
+    const { calls } = mockFetch(['id: 7\nevent: bot\ndata: {"id":"b1"}\n\n']);
+    const stream = streamEvents('/api/events?since=4&boot=boot-1');
+    const seen = collect(stream, ['bot']);
+
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    expect(stream.lastEventId()).toBe('7');
+    expect(calls[0]!.url).toContain('/api/events?since=4&boot=boot-1');
+    stream.close();
+  });
+
   it('sends no session header when there is no token to find', async () => {
     const { calls } = mockFetch(['event: hello\ndata: {}\n\n']);
     const stream = streamEvents('/api/events');

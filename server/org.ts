@@ -80,6 +80,7 @@ export function orgGraph() {
       activity: b.activity ?? 'idle',
       unread: b.unread === true,
       avatarUrl: b.avatarUrl,
+      avatarShape: b.avatarShape,
       mascotExpression: b.mascotExpression,
       pos: b.orgPos ?? file.positions[b.id],
     })),

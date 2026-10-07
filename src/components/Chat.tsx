@@ -1,14 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { BotRecord, GroupRecord, Message } from '../../shared/types.ts';
 import { api, apiUrl, speak, uploadAttachment } from '../api.ts';
 import { t } from '../i18n.ts';
 import { currentModelLabel } from '../model-catalog.ts';
+import { useStreaming, useTrace } from '../stream-store.ts';
+import { activityForStatus, workLine, workLineShown } from '../work-line.ts';
+import { pickBusyBot } from '../busy-strip.ts';
 import { snapshotFor, useStore, type InstanceSnapshot } from '../store.tsx';
 import { ActivityChip, ApprovalCard, ConnectorCard, GoalRunCard, RoutineRunCard, SecretCard } from './Cards.tsx';
 import { ActivityDot, Avatar, botColor } from './Avatar.tsx';
 import { Icon, IconButton, type IconName } from './Icons.tsx';
+import { draftAfterFailure, draftAfterSend } from '../composer-send.ts';
+import { applyDictation, detectSpeechPlatform, speechAvailability } from '../dictation.ts';
 import { isLean } from '../usage.ts';
 import { EngineSwitcher } from './Overlays.tsx';
 import { ChatModelPicker } from './ChatModelPicker.tsx';
@@ -68,16 +73,7 @@ function Spoiler({ text }: { text: string }) {
 /** Reacting is a one-tap thing, so the set is short and fixed rather than a picker. */
 const REACTIONS = ['👍', '🎉', '👀', '❤️', '😄'];
 
-function Bubble({
-  message,
-  threadId,
-  onReply,
-  onEdit,
-  onRewind,
-  onCancelQueued,
-  voice,
-  branches,
-}: {
+type BubbleProps = {
   message: Message;
   botId?: string;
   threadId?: string;
@@ -86,8 +82,57 @@ function Bubble({
   onRewind: (m: Message) => void;
   onCancelQueued?: (m: Message) => void;
   voice?: string;
-  branches?: React.ReactNode;
-}) {
+  branches?: ReactNode;
+};
+
+function attachmentKey(message: Message): string {
+  return (message.attachments ?? []).map((item) => item.id).join('\n');
+}
+
+function reactionKey(message: Message): string {
+  return (message.reactions ?? []).map((item) => `${item.emoji}:${item.by}`).join('\n');
+}
+
+/** Skip a markdown re-parse when this bubble's visible fields did not change. */
+function bubblePropsEqual(prev: BubbleProps, next: BubbleProps): boolean {
+  const a = prev.message;
+  const b = next.message;
+  return (
+    prev.botId === next.botId &&
+    prev.threadId === next.threadId &&
+    prev.voice === next.voice &&
+    prev.onReply === next.onReply &&
+    prev.onEdit === next.onEdit &&
+    prev.onRewind === next.onRewind &&
+    prev.onCancelQueued === next.onCancelQueued &&
+    prev.branches === next.branches &&
+    (a === b ||
+      (a.id === b.id &&
+        a.role === b.role &&
+        a.text === b.text &&
+        a.queued === b.queued &&
+        a.queueId === b.queueId &&
+        a.steered === b.steered &&
+        a.replyToId === b.replyToId &&
+        a.png === b.png &&
+        a.mime === b.mime &&
+        a.from?.name === b.from?.name &&
+        a.from?.color === b.from?.color &&
+        attachmentKey(a) === attachmentKey(b) &&
+        reactionKey(a) === reactionKey(b)))
+  );
+}
+
+const Bubble = memo(function Bubble({
+  message,
+  threadId,
+  onReply,
+  onEdit,
+  onRewind,
+  onCancelQueued,
+  voice,
+  branches,
+}: BubbleProps) {
   const isUser = message.role === 'user';
 
   return (
@@ -202,6 +247,26 @@ function Bubble({
       </div>
     </div>
   );
+}, bubblePropsEqual);
+
+/** Follow new streamed text without pulling the reader off an earlier message. */
+function FollowStream({
+  threadId,
+  scroller,
+  bottom,
+}: {
+  threadId: string;
+  scroller: { current: HTMLDivElement | null };
+  bottom: { current: HTMLDivElement | null };
+}) {
+  const streaming = useStreaming(threadId);
+  useEffect(() => {
+    const node = scroller.current;
+    if (!node || !streaming) return;
+    const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+    if (nearBottom) bottom.current?.scrollIntoView({ block: 'end' });
+  }, [streaming, scroller, bottom]);
+  return null;
 }
 
 function MessageItem(props: {
@@ -407,6 +472,15 @@ function AttachmentChip({
   );
 }
 
+interface DictationSession {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onresult: (event: { results?: ArrayLike<{ 0?: { transcript?: string } }> }) => void;
+  onerror: () => void;
+  start: () => void;
+}
+
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
@@ -429,7 +503,7 @@ function Composer({
   onSend: (
     text: string,
     opts: { images?: { mime: string; data: string }[]; attachments?: Message['attachments']; context?: string; injectNow?: boolean },
-  ) => void;
+  ) => void | Promise<unknown>;
   onInterrupt: () => void;
   replyTo?: Message | null;
   onClearReply: () => void;
@@ -442,6 +516,16 @@ function Composer({
   const [contextOpen, setContextOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [dictationNote, setDictationNote] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const sendGen = useRef(0);
+  const draftTouched = useRef(false);
+  const draftNow = useRef({ text: '', files: [] as { id: string; name: string; mime: string; url: string }[], context: '' });
+  draftNow.current = { text, files, context };
+  const markDraft = (): void => {
+    draftTouched.current = true;
+  };
+  const [spend, setSpend] = useState<{ verdict: 'allow' | 'warn' | 'block'; spentUsd: number; capUsd: number | null } | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
@@ -453,8 +537,47 @@ function Composer({
   const disabled = pendingApproval || (busy && !canSteer && !canQueue);
   const canSend = Boolean(text.trim() || files.length || context.trim());
 
+  useEffect(() => {
+    if (!bot) {
+      setSpend(null);
+      return;
+    }
+    void api
+      .get<{ verdict: 'allow' | 'warn' | 'block'; spentUsd: number; capUsd: number | null }>(`/api/bots/${bot.id}/spend`)
+      .then(setSpend)
+      .catch(() => setSpend(null));
+  }, [bot]);
+
+  const dictate = (): void => {
+    const platform = window.hb?.platform ?? detectSpeechPlatform();
+    const host = window as Window & { SpeechRecognition?: new () => DictationSession; webkitSpeechRecognition?: new () => DictationSession };
+    const Ctor = host.SpeechRecognition ?? host.webkitSpeechRecognition;
+    const status = speechAvailability(platform, typeof Ctor === 'function');
+    if (!status.available || !Ctor) {
+      setDictationNote(status.reason ?? 'Dictation is not available.');
+      return;
+    }
+    setDictationNote(null);
+    const session = new Ctor();
+    session.lang = navigator.language || 'en-US';
+    session.interimResults = false;
+    session.continuous = false;
+    session.onresult = (event) => {
+      const spoken = event.results?.[0]?.[0]?.transcript;
+      markDraft();
+      setText((current) => applyDictation(current, spoken).text);
+    };
+    session.onerror = () => setDictationNote(speechAvailability(platform, false).reason ?? 'Dictation is not available.');
+    try {
+      session.start();
+    } catch {
+      setDictationNote(speechAvailability(platform, false).reason ?? 'Dictation is not available.');
+    }
+  };
+
   const addFiles = async (list: File[]): Promise<void> => {
     if (!list.length) return;
+    markDraft();
     setUploading(true);
     try {
       const uploaded = await Promise.all(list.map(uploadAttachment));
@@ -466,18 +589,39 @@ function Composer({
 
   const submit = (injectNow = false): void => {
     if (!canSend) return;
-    onSend(text.trim(), {
-      attachments: files.length ? files : undefined,
-      context: context.trim() || undefined,
-      injectNow,
-    });
-    setText('');
-    setFiles([]);
-    setContext('');
+    const draft = { text: text.trim(), files, context: context.trim() };
+    const gen = ++sendGen.current;
+    draftTouched.current = false;
+    const cleared = draftAfterSend(draft, null);
+    setText(cleared.draft.text);
+    setFiles(cleared.draft.files);
+    setContext(cleared.draft.context);
     setContextOpen(false);
-    if (ref.current) {
-      ref.current.style.height = 'auto';
+    setSendError(null);
+    if (ref.current) ref.current.style.height = 'auto';
+    let pending: void | Promise<unknown>;
+    try {
+      pending = onSend(draft.text, {
+        attachments: draft.files.length ? draft.files : undefined,
+        context: draft.context || undefined,
+        injectNow,
+      });
+    } catch (err) {
+      pending = Promise.reject(err);
     }
+    void Promise.resolve(pending).catch((err: unknown) => {
+      if (sendGen.current !== gen) return;
+      const restored = draftAfterSend(draft, err);
+      const next = draftAfterFailure(restored.draft, draftNow.current, draftTouched.current);
+      // A newer keystroke is already in state. Writing the ref back would replace it with a stale snapshot.
+      if (next === restored.draft) {
+        setText(next.text);
+        setFiles(next.files);
+        setContext(next.context);
+        if (next.context) setContextOpen(true);
+      }
+      setSendError(restored.error);
+    });
   };
 
   const onPaste = async (e: React.ClipboardEvent): Promise<void> => {
@@ -532,7 +676,7 @@ function Composer({
       {files.length ? (
         <div className="mb-1 flex flex-wrap gap-1">
           {files.map((f) => (
-            <AttachmentChip key={f.id} attachment={f} onRemove={() => setFiles(files.filter((x) => x.id !== f.id))} />
+            <AttachmentChip key={f.id} attachment={f} onRemove={() => { markDraft(); setFiles(files.filter((x) => x.id !== f.id)); }} />
           ))}
         </div>
       ) : null}
@@ -540,7 +684,10 @@ function Composer({
       {contextOpen ? (
         <textarea
           value={context}
-          onChange={(e) => setContext(e.target.value)}
+          onChange={(e) => {
+            markDraft();
+            setContext(e.target.value);
+          }}
           placeholder="Context for this turn only — a brief, a snippet, a constraint."
           rows={2}
           className="mb-1 w-full resize-none rounded-lg px-2 py-1.5 text-[12px]"
@@ -552,7 +699,7 @@ function Composer({
           <button type="button" onClick={() => setContextOpen(true)}>
             edit
           </button>
-          <button type="button" onClick={() => setContext('')}>
+          <button type="button" onClick={() => { markDraft(); setContext(''); }}>
             clear
           </button>
         </div>
@@ -561,6 +708,38 @@ function Composer({
       {pendingApproval ? (
         <div className="mb-1 text-[12px]" style={{ color: 'var(--color-warning)' }}>
           Waiting on your answer in the card above.
+        </div>
+      ) : null}
+
+      {spend && spend.verdict !== 'allow' && spend.capUsd ? (
+        <div className="mb-1 flex items-center gap-2 text-[12px]" style={{ color: spend.verdict === 'block' ? 'var(--color-danger)' : 'var(--color-warning)' }}>
+          <span>
+            {spend.verdict === 'block'
+              ? `Spend cap reached ($${spend.spentUsd.toFixed(2)} of $${spend.capUsd}). The next turn waits until you confirm.`
+              : `Approaching the $${spend.capUsd} spend cap ($${spend.spentUsd.toFixed(2)} so far).`}
+          </span>
+          {spend.verdict === 'block' && bot ? (
+            <button
+              type="button"
+              onClick={() => void api.post(`/api/bots/${bot.id}/spend-confirm`).then(() => api.get<NonNullable<typeof spend>>(`/api/bots/${bot.id}/spend`).then(setSpend))}
+              className="rounded-lg px-2 py-1"
+              style={{ background: 'var(--color-raised)' }}
+            >
+              Confirm next turn
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {dictationNote ? (
+        <div className="mb-1 text-[12px]" style={{ color: 'var(--color-warning)' }}>
+          {dictationNote}
+        </div>
+      ) : null}
+
+      {sendError ? (
+        <div className="mb-1 text-[12px]" role="alert" style={{ color: 'var(--color-danger)' }}>
+          {sendError}
         </div>
       ) : null}
 
@@ -618,6 +797,18 @@ function Composer({
           ) : null}
         </div>
 
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={dictate}
+          title="Dictate into the composer. Nothing is sent until you press Send."
+          aria-label="Dictate"
+          className="grid h-9 w-9 place-items-center rounded-xl disabled:opacity-40"
+          style={{ background: 'var(--color-inset)', color: 'var(--color-ink-secondary)' }}
+        >
+          <Icon name="microphone" size={16} />
+        </button>
+
         <textarea
           ref={ref}
           rows={1}
@@ -625,7 +816,9 @@ function Composer({
           disabled={disabled}
           onPaste={(e) => void onPaste(e)}
           onChange={(e) => {
+            markDraft();
             setText(e.target.value);
+            setSendError(null);
             const el = e.target;
             el.style.height = 'auto';
             el.style.height = `${Math.min(180, el.scrollHeight)}px`;
@@ -774,6 +967,47 @@ function TaskMenu({
   );
 }
 
+/** Below laptop width the four rail buttons collapse into this menu. */
+function PanelMenu({ onOpen }: { onOpen: (panel: 'computer' | 'inspector' | 'memory' | 'settings') => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="panel-menu relative">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="rounded-lg px-2 py-1 text-[12px]"
+        style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        Panels
+      </button>
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="card anim-pop absolute right-0 z-30 mt-1 w-48 py-1" role="menu" style={{ background: 'var(--color-raised)' }}>
+            {PANEL_BUTTONS.map((item) => (
+              <button
+                key={item.panel}
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px]"
+                onClick={() => {
+                  setOpen(false);
+                  onOpen(item.panel);
+                }}
+              >
+                <Icon name={item.icon} size={14} />
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Chat view
 // ---------------------------------------------------------------------------
@@ -820,11 +1054,35 @@ export function ChatView({
   }, []);
 
   const messages = thread?.messages ?? [];
-  const streaming = state.streaming[bot.threadId];
   useEffect(() => {
-    // Streaming grows the last bubble without adding one, so it has to scroll too.
     bottom.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, streaming]);
+  }, [messages.length]);
+
+  const cancelQueued = useCallback(
+    (message: Message) => {
+      void api.del(`/api/bots/${bot.id}/queue/${message.queueId}`);
+    },
+    [bot.id],
+  );
+  const editMessage = useCallback(
+    (message: Message) => {
+      const next = window.prompt('Edit message', message.text ?? '');
+      if (next && next !== message.text) {
+        void api.post(`/api/bots/${bot.id}/messages/${message.id}/edit`, { text: next, threadId: bot.threadId }).catch((err: unknown) => {
+          window.alert(err instanceof Error ? err.message : 'The edit was not sent.');
+        });
+      }
+    },
+    [bot.id, bot.threadId],
+  );
+  const rewindMessage = useCallback(
+    (message: Message) => {
+      // Rewinding drops everything after this point from the active path.
+      if (!window.confirm('Rewind to here? Later messages leave this branch, and the resume cursors are dropped.')) return;
+      void api.post(`/api/bots/${bot.id}/rewind`, { messageId: message.id, threadId: bot.threadId });
+    },
+    [bot.id, bot.threadId],
+  );
 
   // Jump targets from search, the palette, or find-in-chat all land here.
   const focusId = state.focusMessageId;
@@ -893,20 +1151,52 @@ export function ChatView({
   const pendingApproval = messages.some((m) => m.kind === 'options' && m.card && !m.card.answered && m.card.requestId);
   const busy = bot.activity === 'working' || bot.activity === 'waiting-on-you';
 
-  const send = (text: string, opts: Parameters<Parameters<typeof Composer>[0]['onSend']>[1]): void => {
-    void api.post(`/api/bots/${bot.id}/messages`, {
-      text,
-      threadId: bot.threadId,
-      sendId: crypto.randomUUID(),
-      replyToId: replyTo?.id,
-      attachments: opts.attachments,
-      context: opts.context,
-      injectNow: opts.injectNow,
-    });
-    setReplyTo(null);
-  };
+  const send = (text: string, opts: Parameters<Parameters<typeof Composer>[0]['onSend']>[1]): Promise<void> =>
+    api
+      .post(`/api/bots/${bot.id}/messages`, {
+        text,
+        threadId: bot.threadId,
+        sendId: crypto.randomUUID(),
+        replyToId: replyTo?.id,
+        attachments: opts.attachments,
+        context: opts.context,
+        injectNow: opts.injectNow,
+      })
+      .then(() => {
+        setReplyTo(null);
+      });
 
   const tasks = bot.tasks ?? [];
+  const openJobs = state.jobs.filter((job) => job.botId === bot.id && (job.status === 'queued' || job.status === 'active'));
+  const openJob = openJobs.find((job) => job.status === 'active') ?? openJobs[0];
+  const trace = useTrace(bot.threadId);
+  const live = trace.find(
+    (entry) =>
+      entry.detail &&
+      (entry.type === 'item.started' || entry.type === 'item.completed' || entry.type === 'request.opened' || entry.type === 'runtime.error'),
+  );
+  const pendingMsg = [...messages].reverse().find((m) => m.kind === 'options' && m.card && !m.card.answered && m.card.requestId);
+  const lastActivity = activityForStatus(messages);
+  const status = workLine({
+    activity: bot.activity,
+    userTexts: messages.filter((m) => m.role === 'user' && m.kind === 'text' && m.text).map((m) => m.text ?? ''),
+    pending: pendingMsg?.card
+      ? { title: pendingMsg.card.title, subtitle: pendingMsg.card.subtitle, tool: pendingMsg.card.tool }
+      : undefined,
+    liveDetail: live?.detail,
+    last: lastActivity?.tool ? { name: lastActivity.tool.name, text: lastActivity.text, ok: lastActivity.tool.ok } : undefined,
+    job: openJob ? { status: openJob.status, title: openJob.title } : undefined,
+  });
+  const workingWord = t('app.working');
+  const alreadyWorking =
+    status?.text === workingWord ||
+    status?.text === 'Working' ||
+    status?.text.startsWith(`${workingWord} ·`) ||
+    status?.text.startsWith('Working · ');
+  const statusText =
+    status && status.tone === 'working' && !alreadyWorking ? `${workingWord} · ${status.text}` : status?.text;
+  const stripBot = pickBusyBot(state.bots);
+  const shownStatus = status && statusText ? workLineShown(statusText, status.tone, stripBot?.id === bot.id, workingWord) : null;
   const harnessName = snapshot?.displayName ?? bot.modelSelection.instanceId;
   const modelLabel = currentModelLabel(bot.modelSelection, state.instances).model || bot.modelSelection.model;
 
@@ -917,7 +1207,7 @@ export function ChatView({
             it is the same gesture, so it should not need a hunt along the toolbar.
             The drawer has no rail to open, so there it stays a picture. */}
         {compact ? (
-          <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} size={30} />
+          <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} avatarShape={bot.avatarShape} size={30} />
         ) : (
           <button
             type="button"
@@ -926,7 +1216,7 @@ export function ChatView({
             aria-label={`${bot.name} — profile and settings`}
             className="rounded-xl"
           >
-            <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} size={30} />
+            <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} avatarShape={bot.avatarShape} size={30} />
           </button>
         )}
         <div className="min-w-0 flex-1">
@@ -941,8 +1231,19 @@ export function ChatView({
             </span>
             <ActivityDot activity={bot.activity} />
             {/* Presence is a small live region, not a banner. */}
-            <span className="text-[12px]" style={{ color: 'var(--color-ink-secondary)' }} aria-live="polite">
-              {bot.activity === 'working' ? t('app.working') : bot.activity === 'waiting-on-you' ? t('app.waiting') : ''}
+            <span
+              className="text-[12px] font-medium"
+              style={{
+                color:
+                  bot.activity === 'working'
+                    ? 'var(--color-success)'
+                    : bot.activity === 'waiting-on-you'
+                      ? 'var(--color-warning)'
+                      : 'var(--color-ink-secondary)',
+              }}
+              aria-live="polite"
+            >
+              {bot.activity === 'working' ? t('app.working') : bot.activity === 'waiting-on-you' ? t('app.needsYou') : ''}
             </span>
           </div>
           {/* The engine line was the one thing in the header that showed state and did
@@ -951,7 +1252,7 @@ export function ChatView({
           <button
             type="button"
             onClick={() => setSwitching(true)}
-            title="Change engine or model"
+            title={bot.modelSelection.model || 'Change engine or model'}
             className="flex max-w-full items-center gap-1 truncate rounded-md px-1 py-0.5 text-[12px] hover:opacity-80"
             style={{ color: snapshot?.state === 'unavailable' ? 'var(--color-warning)' : 'var(--color-ink-secondary)' }}
           >
@@ -991,15 +1292,56 @@ export function ChatView({
         {compact ? null : (
           <>
             <TaskMenu bot={bot} branchesOpen={Boolean(allMessages)} onBranches={() => void showBranches()} onChanged={refreshBots} />
-            <span className="flex items-center gap-0.5 rounded-lg p-0.5" style={{ background: 'var(--color-inset)' }}>
+            <span className="panel-icons items-center gap-0.5 rounded-lg p-0.5" style={{ background: 'var(--color-inset)' }}>
               {PANEL_BUTTONS.map((item) => (
                 <IconButton key={item.panel} icon={item.icon} label={item.label} onClick={() => onOpenPanel(item.panel)} />
               ))}
             </span>
+            <PanelMenu onOpen={onOpenPanel} />
           </>
         )}
         {onClose ? <IconButton icon="close" label="Close chat" tone="raised" onClick={onClose} /> : null}
       </header>
+
+      {status && shownStatus ? (
+        <div
+          className="flex h-[22px] items-center gap-2 border-b px-3 hairline"
+          style={{ background: 'var(--color-panel)' }}
+          title={shownStatus}
+          data-work-line=""
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${status.tone === 'working' ? 'status-pulse' : ''}`}
+            style={{
+              background:
+                status.tone === 'failed'
+                  ? 'var(--color-danger)'
+                  : status.tone === 'needs-you'
+                    ? 'var(--color-warning)'
+                    : status.tone === 'working'
+                      ? 'var(--color-success)'
+                      : 'var(--color-ink-secondary)',
+            }}
+          />
+          <span
+            className={`truncate text-[11px] leading-none ${status.tone === 'working' || status.tone === 'needs-you' ? 'font-medium' : ''}`}
+            style={{
+              color:
+                status.tone === 'failed'
+                  ? 'var(--color-danger)'
+                  : status.tone === 'needs-you'
+                    ? 'var(--color-warning)'
+                    : status.tone === 'working'
+                      ? 'var(--color-success)'
+                      : 'var(--color-ink-secondary)',
+            }}
+          >
+            {shownStatus}
+          </span>
+        </div>
+      ) : null}
 
       {finding ? (
         <ChatFindBar
@@ -1031,7 +1373,7 @@ export function ChatView({
 
         {messages.length === 0 ? (
           <div className="mx-auto mt-16 max-w-md text-center">
-            <Avatar name={bot.name} color={bot.color} size={56} />
+            <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={56} />
             <div className="mt-3 text-[15px] font-semibold">{bot.name}</div>
             <div className="mt-1 text-[13px]" style={{ color: 'var(--color-ink-secondary)' }}>
               {bot.title || 'Describe a concrete outcome to get started.'}
@@ -1051,22 +1393,14 @@ export function ChatView({
               focused={focusId === message.id}
               highlight={finding ? findQuery : undefined}
               onReply={setReplyTo}
-              onCancelQueued={(m) => void api.del(`/api/bots/${bot.id}/queue/${m.queueId}`)}
-              onEdit={(m) => {
-                const next = window.prompt('Edit message', m.text ?? '');
-                if (next && next !== m.text) {
-                  void api.post(`/api/bots/${bot.id}/messages/${m.id}/edit`, { text: next, threadId: bot.threadId });
-                }
-              }}
-              onRewind={(m) => {
-                // Rewinding drops everything after this point from the active path.
-                if (!window.confirm('Rewind to here? Later messages leave this branch, and the resume cursors are dropped.')) return;
-                void api.post(`/api/bots/${bot.id}/rewind`, { messageId: m.id, threadId: bot.threadId });
-              }}
+              onCancelQueued={cancelQueued}
+              onEdit={editMessage}
+              onRewind={rewindMessage}
             />
           ))}
         </div>
         <div ref={bottom} />
+        <FollowStream threadId={bot.threadId} scroller={scroller} bottom={bottom} />
       </div>
 
       <Composer
@@ -1142,7 +1476,7 @@ function RoomSettings({ group, onClose }: { group: GroupRecord; onClose: () => v
                   })
                 }
               />
-              <Avatar name={bot.name} color={bot.color} size={20} />
+              <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={20} />
               {bot.name}
             </label>
           ))}
@@ -1265,7 +1599,7 @@ export function GroupView({ group }: { group: GroupRecord }) {
         pendingApproval={false}
         onClearReply={() => {}}
         onSend={(text, opts) =>
-          void api.post(`/api/groups/${group.id}/messages`, {
+          api.post(`/api/groups/${group.id}/messages`, {
             text,
             channelMode: mode,
             sendId: crypto.randomUUID(),

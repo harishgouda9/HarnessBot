@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell, Tray, Menu } from 'electron';
 import { utilityProcess } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { trayIconDataUrl } from './tray-icon.mjs';
 
 /**
  * The desktop shell owns the things a Node child process cannot: the window, OS
@@ -103,18 +104,22 @@ function startHarness(port) {
     : path.join(process.resourcesPath, 'server', 'index.js');
 
   const args = isDev ? ['--experimental-strip-types', entry] : [entry];
+  // utilityProcess is already a Node environment. Forcing ELECTRON_RUN_AS_NODE
+  // re-execs electron.exe as plain Node, which then rejects --type=utility.
+  const env = {
+    ...process.env,
+    HB_PORT: String(port),
+    HB_WEBHOOK_PORT: String(port + 1),
+    // The packaged harness serves the built renderer from the same origin.
+    HB_STATIC_DIR: isDev ? '' : path.join(process.resourcesPath, 'ui'),
+    NODE_OPTIONS: isDev ? '--experimental-strip-types' : '',
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
 
   harness = utilityProcess.fork(args[args.length - 1], [], {
-    env: {
-      ...process.env,
-      HB_PORT: String(port),
-      HB_WEBHOOK_PORT: String(port + 1),
-      // The packaged harness serves the built renderer from the same origin.
-      HB_STATIC_DIR: isDev ? '' : path.join(process.resourcesPath, 'ui'),
-      ELECTRON_RUN_AS_NODE: '1',
-      NODE_OPTIONS: isDev ? '--experimental-strip-types' : '',
-    },
+    env,
     stdio: 'pipe',
+    execArgv: isDev ? ['--experimental-strip-types'] : [],
   });
 
   const log = fs.createWriteStream(path.join(app.getPath('userData'), 'server.log'), { flags: 'a' });
@@ -144,6 +149,124 @@ ipcMain.handle('hb:setBadge', (_event, count) => {
   else mainWindow?.setOverlayIcon?.(null, count > 0 ? `${count} unread` : '');
 });
 
+// -- tray, login, native notifications ---------------------------------------
+
+let tray = null;
+let presence = { tray: true, openAtLogin: false };
+
+function presencePath() {
+  return path.join(app.getPath('userData'), 'presence.json');
+}
+
+function loadPresence() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(presencePath(), 'utf8'));
+    return { tray: parsed.tray !== false, openAtLogin: parsed.openAtLogin === true };
+  } catch {
+    return { tray: true, openAtLogin: false };
+  }
+}
+
+function savePresence() {
+  try {
+    fs.writeFileSync(presencePath(), JSON.stringify(presence));
+  } catch {
+    /* a failed write must not take the window down */
+  }
+}
+
+/** Same shape as server/desktop.ts loginItemSettings. */
+function loginItemSettings(enabled) {
+  return { openAtLogin: enabled, openAsHidden: enabled };
+}
+
+function applyLogin() {
+  try {
+    app.setLoginItemSettings(loginItemSettings(presence.openAtLogin));
+  } catch {
+    /* some sessions cannot edit the login items; the checkbox still reflects the choice */
+  }
+}
+
+function showMain() {
+  if (!mainWindow) {
+    void createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function trayIcon() {
+  return nativeImage.createFromDataURL(trayIconDataUrl()).resize({ width: 16, height: 16 });
+}
+
+function rebuildTray() {
+  if (!presence.tray) {
+    tray?.destroy();
+    tray = null;
+    return;
+  }
+  if (!tray) {
+    tray = new Tray(trayIcon());
+    tray.on('click', () => showMain());
+  }
+  tray.setToolTip('HarnessBot');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Show HarnessBot', click: () => showMain() },
+      {
+        label: 'Start when I sign in',
+        type: 'checkbox',
+        checked: presence.openAtLogin,
+        click: (item) => {
+          presence.openAtLogin = item.checked;
+          savePresence();
+          applyLogin();
+        },
+      },
+      {
+        label: 'Quit',
+        click: () => {
+          app.isQuittingForReal = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function openNotice(payload) {
+  showMain();
+  mainWindow?.webContents.send('hb:open-thread', { botId: payload.botId, threadId: payload.threadId });
+}
+
+ipcMain.handle('hb:presence-get', () => ({ ...presence, platform: process.platform }));
+
+ipcMain.handle('hb:presence-set', (_event, patch) => {
+  if (patch && typeof patch.tray === 'boolean') presence.tray = patch.tray;
+  if (patch && typeof patch.openAtLogin === 'boolean') presence.openAtLogin = patch.openAtLogin;
+  savePresence();
+  applyLogin();
+  rebuildTray();
+  if (!presence.tray) showMain();
+  return { ...presence, platform: process.platform };
+});
+
+ipcMain.handle('hb:notify', (_event, payload) => {
+  if (!payload || typeof payload.botName !== 'string' || typeof payload.threadId !== 'string') {
+    return { shown: false, reason: 'Notification needs a bot and a task.' };
+  }
+  const title = `${payload.botName} · ${payload.taskTitle || 'Task'}`;
+  const body = String(payload.preview ?? '');
+  if (!Notification.isSupported()) return { shown: false, reason: 'Native notifications are not supported in this session.', title, body };
+  const notice = new Notification({ title, body });
+  notice.on('click', () => openNotice(payload));
+  notice.show();
+  return { shown: true, title, body, botId: payload.botId, threadId: payload.threadId };
+});
+
 // -- boot --------------------------------------------------------------------
 
 async function createWindow() {
@@ -163,7 +286,14 @@ async function createWindow() {
     },
   });
 
-  mainWindow.on('close', saveWindowState);
+  mainWindow.on('close', (event) => {
+    saveWindowState();
+    // Tray keeps the harness alive. Closing the window hides it instead of quitting.
+    if (presence.tray && !app.isQuittingForReal) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -187,10 +317,14 @@ app.whenReady().then(async () => {
   if (!ready && !isDev) {
     dialog.showErrorBox('HarnessBot', 'The local harness did not start. See server.log in the app data folder.');
   }
+  presence = loadPresence();
+  applyLogin();
+  rebuildTray();
   await createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    else showMain();
   });
 });
 
@@ -202,5 +336,6 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
+  if (presence.tray) return;
   if (process.platform !== 'darwin') app.quit();
 });

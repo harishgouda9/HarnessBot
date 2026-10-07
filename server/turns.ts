@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { findAppSource } from './paths.ts';
 import type { BotRecord, GroupRecord, Message, ThreadId } from '../shared/types.ts';
 import type { InstanceSnapshot, RuntimeEvent, SendTurnInput, TranscriptLine, TurnIntegrations } from './contracts.ts';
-import { approvals, outcomeForChoice } from './approvals.ts';
+import { approvals, outcomeForChoice, recentRefusals } from './approvals.ts';
+import { noteTurnOrigin } from './turn-origin.ts';
 import { getConfig } from './config.ts';
 import { computerMount, hostScreenServer } from './computer.ts';
 import { findCli } from './drivers/spawn.ts';
@@ -13,10 +14,12 @@ import { bus } from './harness/bus.ts';
 import { registry } from './harness/registry.ts';
 import { composeTurnText, imagesFromAttachments } from './attachments.ts';
 import { compactTranscript, externalise, memoryForPrompt, sharedDir } from './memory.ts';
-import { clip, clipList, estimateTokens, isQuickTurn, limitsFor, pickRelevant, pickSmallerModel } from './prompt-budget.ts';
+import { clip, clipList, estimateTokens, isQuickTurn, limitsFor, pickRelevant, resolveTurnModel } from './prompt-budget.ts';
 import { skillsForPrompt } from './skills.ts';
 import { store } from './store.ts';
 import { notify } from './notifications.ts';
+import { botSpentUsd, evaluateSpend } from './spend.ts';
+import { releaseRoutineThread } from './routine-hold.ts';
 import { internalMountEnv } from './internal-tokens.ts';
 
 /**
@@ -43,6 +46,8 @@ export interface SendOptions {
   from?: Message['from'];
   /** The user message is already in the transcript. Do not append another copy. */
   recordedMessageId?: string;
+  /** Who started this turn. A routine or a handoff must not inherit a chat grant. */
+  origin?: { kind: 'person' | 'routine' | 'handoff' | 'job'; id?: string; label?: string };
   /** Set on a queued item so cancel can find it. Not a send idempotency key. */
   queueId?: string;
   /** `text` is already `composeTurnText` output. Draining a queue must not compose it again. */
@@ -103,7 +108,7 @@ function harnessSource(): string | null {
   return appSource;
 }
 
-function systemPrompt(
+export function systemPrompt(
   bot: BotRecord,
   group?: GroupRecord,
   query = '',
@@ -177,7 +182,8 @@ function systemPrompt(
   parts.push(
     `Shared workspace: ${sharedDir()}. Every bot here can read and write it. Put large results ` +
       '(scraped data, generated files, reports) there and pass the filename on, rather than pasting ' +
-      'the whole thing into a reply — that is what makes a handoff survive a turn.',
+      'the whole thing into a reply — that is what makes a handoff survive a turn. ' +
+      'When the person asked for files or a pipeline, write them in that folder during this turn, keep going until each file is on disk, and report the path once the write lands.',
   );
 
   parts.push(
@@ -200,6 +206,10 @@ function systemPrompt(
   // the end keeps the cached span as long as possible.
   const memory = memoryForPrompt(bot.id, bot.section);
   if (memory) parts.push(memory);
+
+  // Refusals change between turns, so they sit with memory at the end of the prompt.
+  const refusals = recentRefusals(bot.id);
+  if (refusals) parts.push(refusals);
 
   return parts.join('\n\n');
 }
@@ -380,11 +390,53 @@ export async function resolveEngine(bot: BotRecord): Promise<InstanceSnapshot | 
 // Sending
 // ---------------------------------------------------------------------------
 
+function originFor(opts: SendOptions): NonNullable<SendOptions['origin']> {
+  if (opts.origin) return opts.origin;
+  if (opts.source === 'routine' || opts.source === 'webhook') return { kind: 'routine' };
+  return { kind: 'person' };
+}
+
+function spendIsBlocked(bot: BotRecord): boolean {
+  return evaluateSpend({ spentUsd: botSpentUsd(bot), capUsd: bot.spendCapUsd, confirmedUsd: bot.spendConfirmedUsd }) === 'block';
+}
+
+function refuseSpend(bot: BotRecord, threadId: ThreadId): { error: 'spend-cap' } {
+  const spent = botSpentUsd(bot);
+  store.appendMessage(threadId, {
+    role: 'bot',
+    kind: 'text',
+    text: `Spend cap reached ($${spent.toFixed(2)} of $${bot.spendCapUsd}). Confirm to allow the next turn.`,
+  });
+  store.setActivity(bot.id, 'waiting-on-you');
+  return { error: 'spend-cap' };
+}
+
+/** Confirming the cap is not an answer to an approval card or a live turn. */
+export function releaseSpendHold(botId: string): void {
+  const bot = store.getBot(botId);
+  if (!bot || bot.activity !== 'waiting-on-you') return;
+  const threads = [bot.threadId, ...(bot.tasks ?? []).map((task) => task.threadId)];
+  for (const threadId of threads) {
+    if (isTurnActive(threadId)) return;
+    const waiting = store
+      .visiblePath(threadId)
+      .some((message) => message.kind === 'options' && message.card && !message.card.answered);
+    if (waiting) return;
+  }
+  store.setActivity(bot.id, 'idle');
+}
+
 export async function sendToBot(opts: SendOptions): Promise<{ queued?: boolean; messageId?: string; error?: string }> {
   const bot = store.getBot(opts.botId);
   if (!bot) return { error: 'no such bot' };
 
   const threadId = opts.threadId ?? bot.threadId;
+  noteTurnOrigin(threadId, originFor(opts));
+
+  // A queued drain or an edit already wrote the user line. Refusing here loses
+  // the queue item and, for an edit, reports failure after the branch changed.
+  const alreadyRecorded = Boolean(opts.recordedMessageId && store.getMessage(threadId, opts.recordedMessageId));
+  if (!alreadyRecorded && spendIsBlocked(bot)) return refuseSpend(bot, threadId);
 
   // At-most-once: a retried POST with the same sendId must not send twice.
   // A drain of an already-recorded message has no sendId on purpose, so this
@@ -489,6 +541,7 @@ export async function editUserMessage(
   if (!original || original.role !== 'user' || original.kind !== 'text') return { error: 'no such message' };
   const trimmed = text.trim();
   if (!trimmed) return { error: 'text is required' };
+  if (spendIsBlocked(bot)) return refuseSpend(bot, threadId);
 
   // A queued follow-up belongs to the branch being abandoned.
   cancelAllQueued(threadId);
@@ -539,13 +592,17 @@ async function dispatch(
     store.appendMessage(threadId, { role: 'bot', kind: 'activity', text: note, tool: { name: 'computer', ok: false } });
   }
 
-  let model = bot.modelSelection.model;
-  const wantSmall = quick || (lean && getConfig().lean.preferSmallModel && !opts.attachments?.length && opts.text.length < 280 && !asksForHands(opts.text));
-  if (wantSmall) {
-    const smaller = pickSmallerModel(snapshot.models, model);
-    if (smaller && smaller !== model) {
-      model = smaller;
-    }
+  // A short ask used to swap in the first Haiku/Mini in the whole catalogue, including
+  // another provider. The picker kept showing the pin, and the reply came from that
+  // other model. Smaller-model routing is the explicit Lean checkbox, same provider only.
+  const preferSmall = Boolean(lean && quick && getConfig().lean.preferSmallModel && !asksForHands(opts.text));
+  const model = resolveTurnModel(bot.modelSelection.model, snapshot.models, preferSmall);
+  if (model !== bot.modelSelection.model) {
+    store.appendMessage(threadId, {
+      role: 'bot',
+      kind: 'activity',
+      text: `This short message is using ${model}. The pinned model is still ${bot.modelSelection.model}.`,
+    });
   }
 
   const turnId = randomUUID();
@@ -937,15 +994,27 @@ export async function runGoal(groupId: string, goal: string): Promise<void> {
   });
 }
 
-export function waitForSettle(threadId: ThreadId, timeoutMs = 10 * 60_000): Promise<void> {
-  if (!active.has(threadId)) return Promise.resolve();
+export function isTurnActive(threadId: ThreadId): boolean {
+  return active.has(threadId);
+}
+
+export function discardQueued(threadId: ThreadId): void {
+  queues.delete(threadId);
+}
+
+export function waitForSettle(threadId: ThreadId, timeoutMs = 10 * 60_000): Promise<'settled' | 'timeout'> {
+  if (!active.has(threadId)) return Promise.resolve('settled');
   return new Promise((resolve) => {
-    const timer = setTimeout(finish, timeoutMs);
-    settleWaiters.set(threadId, [...(settleWaiters.get(threadId) ?? []), finish]);
-    function finish() {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: 'settled' | 'timeout') => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve();
-    }
+      resolve(result);
+    };
+    timer = setTimeout(() => finish('timeout'), timeoutMs);
+    settleWaiters.set(threadId, [...(settleWaiters.get(threadId) ?? []), () => finish('settled')]);
   });
 }
 
@@ -960,6 +1029,8 @@ function settle(threadId: ThreadId, reason: string): void {
   if (!turn) return;
   clearTimeout(turn.timeout);
   active.delete(threadId);
+  // A routine's computer-use hold lasts until the turn leaves `active`, not until a wait timer fires.
+  releaseRoutineThread(threadId);
 
   const bot = store.getBot(turn.botId);
   if (bot) store.setActivity(bot.id, 'idle');
@@ -973,7 +1044,12 @@ function settle(threadId: ThreadId, reason: string): void {
   if (queue?.length) {
     const next = queue.shift()!;
     queues.set(threadId, queue);
-    void sendToBot(next);
+    void sendToBot(next).then((result) => {
+      if (result.error !== 'spend-cap') return;
+      const pending = queues.get(threadId) ?? [];
+      pending.unshift(next);
+      queues.set(threadId, pending);
+    });
   }
   void reason;
 }

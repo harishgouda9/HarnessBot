@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { RuntimeEvent } from '../contracts.ts';
-import { appendNdjson, dataPath, ensureDir } from '../paths.ts';
+import { appendNdjsonLimited, threadLogPath } from '../paths.ts';
 
 /**
  * Fan-in for every driver. One bus, one subscription point.
@@ -22,8 +22,12 @@ export class EventBus extends EventEmitter {
       this.dropped++;
       return;
     }
-    ensureDir(dataPath('events'));
-    appendNdjson(dataPath('events', `${event.threadId}.ndjson`), event);
+    // Token deltas are ephemeral. The finished message lives in SQLite; writing every
+    // token synchronously is what made a long computer-use turn stall the process.
+    if (event.type !== 'content.delta') {
+      const file = threadLogPath('events', event.threadId);
+      if (file) appendNdjsonLimited(file, event);
+    }
     this.emit('event', event);
   }
 

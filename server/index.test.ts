@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { start, server, resolveStaticDir } from './index.ts';
 import { findAppSource } from './paths.ts';
+import { VERSION } from './version.ts';
 import { saveConfig } from './config.ts';
 import { registry } from './harness/registry.ts';
 
@@ -72,6 +73,81 @@ function waitForEvent(kind: string, match: (data: any) => boolean, timeoutMs = 1
   });
 }
 
+type SseFrame = { id: string; event: string; data: string };
+
+/** Read SSE frames until `until` says the assertion has what it needs. No sleeps. */
+function collectFrames(endpoint: string, until: (frames: SseFrame[]) => boolean, timeoutMs = 8_000): Promise<SseFrame[]> {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`timed out reading ${endpoint}`));
+    }, timeoutMs);
+    const frames: SseFrame[] = [];
+
+    const finish = (): void => {
+      clearTimeout(timer);
+      controller.abort();
+      resolve(frames);
+    };
+
+    void (async () => {
+      const res = await fetch(`${BASE}${endpoint}`, { signal: controller.signal });
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let id = '';
+      let event = '';
+      let data: string[] = [];
+      const push = (): void => {
+        if (!event && data.length === 0) {
+          id = '';
+          return;
+        }
+        frames.push({ id, event: event || 'message', data: data.join('\n') });
+        id = '';
+        event = '';
+        data = [];
+        if (until(frames)) finish();
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let index: number;
+        while ((index = buffer.indexOf('\n')) >= 0) {
+          let line = buffer.slice(0, index);
+          buffer = buffer.slice(index + 1);
+          if (line.endsWith('\r')) line = line.slice(0, -1);
+          if (line === '') push();
+          else if (line.startsWith('id:')) id = line.slice(3).trim();
+          else if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).trim());
+        }
+      }
+      if (!controller.signal.aborted) {
+        clearTimeout(timer);
+        reject(new Error(`stream ended before ${endpoint} matched`));
+      }
+    })().catch((err) => {
+      if (controller.signal.aborted) return;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function botFrame(frames: SseFrame[], id: string): SseFrame | undefined {
+  return frames.find((frame) => {
+    if (frame.event !== 'bot') return false;
+    try {
+      return (JSON.parse(frame.data) as { id?: string }).id === id;
+    } catch {
+      return false;
+    }
+  });
+}
+
 beforeAll(async () => {
   saveConfig({
     instances: { testcli: { driver: 'claude', displayName: 'Test CLI', config: { command: FAKE_CLI } } },
@@ -88,7 +164,9 @@ describe('health and identity', () => {
   it('identifies itself so a probe can tell us from a stranger on the port', async () => {
     const { body } = await call('GET', '/api/health');
     expect(body.app).toBe('harnessbot');
-    expect(body.version).toBe('0.1.44');
+    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { version: string };
+    expect(body.version).toBe(pkg.version);
+    expect(body.version).toBe(VERSION);
     expect(body.static).toBe(false);
   });
 
@@ -107,6 +185,42 @@ describe('health and identity', () => {
     const { status, body } = await call('GET', '/api/this-route-does-not-exist');
     expect(status).toBe(404);
     expect(body.error).toBe('not found');
+  });
+});
+
+describe('event resume', () => {
+  it('numbers frames, replays only newer ones, and resyncs a foreign boot', async () => {
+    const { body: first } = await call('POST', '/api/bots', { name: 'SeqOne' });
+    const { body: second } = await call('POST', '/api/bots', { name: 'SeqTwo' });
+
+    const opened = await collectFrames('/api/events', (frames) => Boolean(botFrame(frames, second.id)));
+    const hello = opened.find((frame) => frame.event === 'hello');
+    const boot = (JSON.parse(hello?.data ?? '{}') as { serverBootId?: string }).serverBootId;
+    const firstFrame = botFrame(opened, first.id);
+    const secondFrame = botFrame(opened, second.id);
+    expect(boot).toEqual(expect.any(String));
+    expect(Number(firstFrame?.id)).toBeGreaterThan(0);
+    expect(Number(secondFrame?.id)).toBeGreaterThan(Number(firstFrame?.id));
+
+    const resumed = await collectFrames(
+      `/api/events?since=${firstFrame!.id}&boot=${encodeURIComponent(boot!)}`,
+      (frames) => Boolean(botFrame(frames, second.id)),
+    );
+    expect(botFrame(resumed, first.id)).toBeUndefined();
+    expect(botFrame(resumed, second.id)?.id).toBe(secondFrame?.id);
+
+    const foreign = await collectFrames(
+      `/api/events?since=${firstFrame!.id}&boot=not-this-process`,
+      (frames) => frames.some((frame) => frame.event === 'resync'),
+    );
+    expect(foreign.some((frame) => frame.event === 'bot')).toBe(false);
+    expect((JSON.parse(foreign.find((frame) => frame.event === 'resync')!.data) as { serverBootId: string }).serverBootId).toBe(boot);
+
+    const gapped = await collectFrames(
+      `/api/events?since=-1&boot=${encodeURIComponent(boot!)}`,
+      (frames) => frames.some((frame) => frame.event === 'resync'),
+    );
+    expect(gapped.some((frame) => frame.event === 'bot')).toBe(false);
   });
 });
 

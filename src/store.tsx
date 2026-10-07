@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
-import type { BotRecord, GroupRecord, Message, Routine, RoutineRun } from '../shared/types.ts';
-import { api, streamEvents, type EventStream } from './api.ts';
+import type { AvatarShape, BotRecord, GroupRecord, JobRecord, Message, Routine, RoutineRun, Workflow, WorkflowRun } from '../shared/types.ts';
+import { api, speak, streamEvents, type EventStream } from './api.ts';
+import { replyToSpeak } from './speak-replies.ts';
+import { clearStream, pushDelta, pushTrace } from './stream-store.ts';
 
 /**
  * One store, one reducer, one SSE stream.
@@ -78,6 +80,7 @@ export interface OrgNode {
   activity?: string;
   unread?: boolean;
   avatarUrl?: string;
+  avatarShape?: AvatarShape;
   mascotExpression?: string | null;
   pos?: { x: number; y: number };
 }
@@ -110,16 +113,10 @@ export interface Notification {
   botId: string;
   botName: string;
   threadId: string;
+  taskTitle?: string;
   kind: 'needs-approval' | 'needs-hands' | 'finished' | 'failed';
   preview: string;
   at: number;
-}
-
-export interface RuntimeTrace {
-  at: number;
-  threadId: string;
-  type: string;
-  detail: string;
 }
 
 export interface State {
@@ -140,12 +137,12 @@ export interface State {
   fetchGen: Record<string, number>;
   routines: Routine[];
   runs: RoutineRun[];
+  workflows: Workflow[];
+  workflowRuns: WorkflowRun[];
+  jobs: JobRecord[];
   notifications: Notification[];
-  /** Streaming deltas, per thread. Shown in the inspector, never painted into a bubble. */
-  streaming: Record<string, string>;
-  trace: RuntimeTrace[];
   selected: { kind: 'bot' | 'group'; id: string } | null;
-  view: 'chat' | 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder' | 'vm' | 'browser';
+  view: 'chat' | 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder' | 'vm' | 'browser' | 'history' | 'workflows';
   /**
    * The chat drawer. It keeps a bot conversation open on the right while a workspace
    * page owns the centre, so opening the org chart does not mean losing your place.
@@ -212,9 +209,10 @@ export const initialState: State = {
   fetchGen: {},
   routines: [],
   runs: [],
+  workflows: [],
+  workflowRuns: [],
+  jobs: [],
   notifications: [],
-  streaming: {},
-  trace: [],
   selected: null,
   view: 'chat',
   drawerBotId: null,
@@ -244,12 +242,17 @@ type Action =
   | { type: 'routines'; routines: Routine[] }
   | { type: 'routine'; routine: Routine }
   | { type: 'routine.deleted'; id: string }
+  | { type: 'jobs'; jobs: JobRecord[] }
+  | { type: 'job'; job: JobRecord }
+  | { type: 'job.deleted'; id: string }
   | { type: 'runs'; runs: RoutineRun[] }
+  | { type: 'workflows'; workflows: Workflow[] }
+  | { type: 'workflow'; workflow: Workflow }
+  | { type: 'workflow.deleted'; id: string }
+  | { type: 'workflowRuns'; runs: WorkflowRun[] }
+  | { type: 'workflow.run'; run: WorkflowRun }
   | { type: 'notify'; notification: Notification }
   | { type: 'notifications'; notifications: Notification[] }
-  | { type: 'stream'; threadId: string; delta: string }
-  | { type: 'stream.clear'; threadId: string }
-  | { type: 'trace'; trace: RuntimeTrace }
   | { type: 'select'; selected: State['selected'] }
   | { type: 'view'; view: State['view'] }
   | { type: 'drawer'; botId: string | null }
@@ -285,6 +288,7 @@ export function reducer(state: State, action: Action): State {
       return {
         ...state,
         bots: state.bots.filter((b) => b.id !== action.id),
+        jobs: state.jobs.filter((job) => job.botId !== action.id),
         selected: state.selected?.id === action.id ? null : state.selected,
       };
     case 'groups':
@@ -387,21 +391,28 @@ export function reducer(state: State, action: Action): State {
       return { ...state, routines: upsert(state.routines, action.routine) };
     case 'routine.deleted':
       return { ...state, routines: state.routines.filter((r) => r.id !== action.id) };
+    case 'jobs':
+      return { ...state, jobs: action.jobs };
+    case 'job':
+      return { ...state, jobs: upsert(state.jobs, action.job) };
+    case 'job.deleted':
+      return { ...state, jobs: state.jobs.filter((job) => job.id !== action.id) };
     case 'runs':
       return { ...state, runs: action.runs };
+    case 'workflows':
+      return { ...state, workflows: action.workflows };
+    case 'workflow':
+      return { ...state, workflows: upsert(state.workflows, action.workflow) };
+    case 'workflow.deleted':
+      return { ...state, workflows: state.workflows.filter((workflow) => workflow.id !== action.id) };
+    case 'workflowRuns':
+      return { ...state, workflowRuns: action.runs };
+    case 'workflow.run':
+      return { ...state, workflowRuns: upsert(state.workflowRuns, action.run) };
     case 'notify':
       return { ...state, notifications: [action.notification, ...state.notifications].slice(0, 50) };
     case 'notifications':
       return { ...state, notifications: action.notifications.slice(0, 50) };
-    case 'stream':
-      return { ...state, streaming: { ...state.streaming, [action.threadId]: (state.streaming[action.threadId] ?? '') + action.delta } };
-    case 'stream.clear': {
-      const streaming = { ...state.streaming };
-      delete streaming[action.threadId];
-      return { ...state, streaming };
-    }
-    case 'trace':
-      return { ...state, trace: [action.trace, ...state.trace].slice(0, 300) };
     case 'select':
       return { ...state, selected: action.selected, view: 'chat', drawerBotId: null, focusMessageId: null };
     case 'focus':
@@ -440,6 +451,8 @@ interface StoreValue {
   refreshInstances: () => Promise<void>;
   refreshConfig: () => Promise<void>;
   refreshRoutines: () => Promise<void>;
+  refreshWorkflows: () => Promise<void>;
+  refreshJobs: () => Promise<void>;
   refreshOrgGraph: () => Promise<void>;
 }
 
@@ -447,6 +460,8 @@ const StoreContext = createContext<StoreValue | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const loading = useRef(new Set<string>());
   const fetchGen = useRef(new Map<string, number>());
 
@@ -497,30 +512,56 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'runs', runs });
   };
 
+  const refreshJobs = async (): Promise<void> => {
+    dispatch({ type: 'jobs', jobs: await api.get<JobRecord[]>('/api/jobs') });
+  };
+
+  const refreshWorkflows = async (): Promise<void> => {
+    const [workflows, runs] = await Promise.all([
+      api.get<Workflow[]>('/api/workflows'),
+      api.get<WorkflowRun[]>('/api/workflows/runs'),
+    ]);
+    dispatch({ type: 'workflows', workflows });
+    dispatch({ type: 'workflowRuns', runs });
+  };
+
+  // Roster, config, jobs, and the notification backlog. The mount effect and a
+  // resume that cannot trust the replay ring both use this. Open threads are
+  // reloaded by the caller when the ring had a hole; a normal resume does not.
+  const hydrate = async (): Promise<void> => {
+    try {
+      await api.get('/api/health');
+      dispatch({ type: 'connected', value: true });
+      await Promise.all([
+        refreshBots(),
+        refreshInstances(),
+        refreshConfig(),
+        refreshRoutines(),
+        // A harness that has not been updated yet has no /api/jobs. That must not
+        // blank the rest of the roster while the page is open.
+        refreshJobs().catch(() => undefined),
+        refreshWorkflows().catch(() => undefined),
+        // Backfill: SSE only carries what happens from now on, and a reload should
+        // not lose the fact that a bot is still waiting on you.
+        api
+          .get<Notification[]>('/api/notifications')
+          .then((notifications) => dispatch({ type: 'notifications', notifications }))
+          .catch(() => undefined),
+      ]);
+    } catch {
+      dispatch({ type: 'connected', value: false });
+    }
+  };
+
   // Initial hydrate. `connected` only flips once the harness has actually answered.
   useEffect(() => {
-    void (async () => {
-      try {
-        await api.get('/api/health');
-        dispatch({ type: 'connected', value: true });
-        await Promise.all([
-          refreshBots(),
-          refreshInstances(),
-          refreshConfig(),
-          refreshRoutines(),
-          // Backfill: SSE only carries what happens from now on, and a reload should
-          // not lose the fact that a bot is still waiting on you.
-          api
-            .get<Notification[]>('/api/notifications')
-            .then((notifications) => dispatch({ type: 'notifications', notifications }))
-            .catch(() => undefined),
-        ]);
-      } catch {
-        dispatch({ type: 'connected', value: false });
-      }
-    })();
+    void hydrate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const lastSeq = useRef('');
+  const lastBoot = useRef('');
+  const hydrateQueued = useRef(false);
 
   // The single SSE fold. Reconnects on drop; sends are idempotent so a reconnect
   // never duplicates work.
@@ -531,16 +572,53 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     const on = (name: string, fn: (data: any) => void): void => source?.addEventListener(name, (e) => fn(JSON.parse(e.data)));
 
+    const queueHydrate = (): void => {
+      if (hydrateQueued.current) return;
+      hydrateQueued.current = true;
+      queueMicrotask(() => {
+        hydrateQueued.current = false;
+        void hydrate().then(() => {
+          for (const [threadId, thread] of Object.entries(stateRef.current.threads)) {
+            if (thread.loaded) void loadThread(threadId, true);
+          }
+        });
+      });
+    };
+
+    const eventsUrl = (): string => {
+      const params = new URLSearchParams();
+      if (lastSeq.current) params.set('since', lastSeq.current);
+      if (lastBoot.current) params.set('boot', lastBoot.current);
+      const qs = params.toString();
+      return qs ? `/api/events?${qs}` : '/api/events';
+    };
+
     const connect = (): void => {
-      source = streamEvents('/api/events');
+      const speakAfter = Date.now();
+      source = streamEvents(eventsUrl());
 
       source.addEventListener('open', () => dispatch({ type: 'connected', value: true }));
-      on('hello', () => dispatch({ type: 'connected', value: true }));
+      on('hello', (hello) => {
+        dispatch({ type: 'connected', value: true });
+        const boot = typeof hello.serverBootId === 'string' ? hello.serverBootId : '';
+        const bootChanged = lastBoot.current !== '' && boot !== '' && boot !== lastBoot.current;
+        if (boot) lastBoot.current = boot;
+        if (bootChanged) queueHydrate();
+      });
+      on('resync', () => queueHydrate());
       on('bot', (bot) => (bot.deleted ? dispatch({ type: 'bot.deleted', id: bot.id }) : dispatch({ type: 'bot', bot })));
       on('bot.deleted', (d) => dispatch({ type: 'bot.deleted', id: d.id }));
       on('group', (group) => group && dispatch({ type: 'group', group }));
       on('group.deleted', (d) => dispatch({ type: 'group.deleted', id: d.id }));
-      on('message', (d) => dispatch({ type: 'message', threadId: d.threadId, message: d.message }));
+      on('message', (d) => {
+        dispatch({ type: 'message', threadId: d.threadId, message: d.message });
+        const current = stateRef.current;
+        const spoken = replyToSpeak(current.bots, current.config?.voice, d.threadId, d.message, speakAfter);
+        if (!spoken) return;
+        void speak(spoken.text, spoken.voice)
+          .then((audio) => audio.play())
+          .catch(() => {});
+      });
       on('message.patch', (d) => dispatch({ type: 'message.patch', threadId: d.threadId, message: d.message }));
       on('thread', (d) => dispatch({ type: 'thread.activeLeaf', threadId: d.threadId, activeLeafId: d.activeLeafId }));
       on('thread.deleted', (d) => dispatch({ type: 'thread.deleted', threadId: d.threadId }));
@@ -548,31 +626,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       on('notify', (notification) => dispatch({ type: 'notify', notification }));
       on('routine', (routine) => dispatch({ type: 'routine', routine }));
       on('routine.deleted', (d) => dispatch({ type: 'routine.deleted', id: d.id }));
+      on('job', (job) => dispatch({ type: 'job', job }));
+      on('job.deleted', (d) => dispatch({ type: 'job.deleted', id: d.id }));
       on('routine.run', () => void refreshRoutines());
+      on('workflow', (workflow) => dispatch({ type: 'workflow', workflow }));
+      on('workflow.deleted', (d) => dispatch({ type: 'workflow.deleted', id: d.id }));
+      on('workflow.run', (run) => dispatch({ type: 'workflow.run', run }));
       on('org-graph', (graph) => dispatch({ type: 'org-graph', graph }));
       on('browser', (tab) => dispatch({ type: 'browser', tab }));
       // Live frames. They land in state and are replaced, never appended to history.
       on('screen', (d) => dispatch({ type: 'screen', botId: d.botId, png: d.png, mime: d.mime, at: d.at }));
 
+      // Display only. The finished reply still arrives as a message, through the reducer.
       on('runtime', (event) => {
         if (event.type === 'content.delta' && event.itemKind === 'assistant_text') {
-          dispatch({ type: 'stream', threadId: event.threadId, delta: event.delta });
+          pushDelta(event.threadId, String(event.delta ?? ''));
         }
         if (event.type === 'turn.completed' || event.type === 'turn.started') {
-          dispatch({ type: 'stream.clear', threadId: event.threadId });
+          clearStream(event.threadId);
         }
-        dispatch({
-          type: 'trace',
-          trace: {
-            at: event.createdAt,
-            threadId: event.threadId,
-            type: event.type,
-            detail: event.summary ?? event.text ?? event.toolName ?? event.message ?? event.delta ?? '',
-          },
+        // The trace keeps 300 lines. A reply's token deltas would evict the tool step the work line is reading.
+        if (event.type === 'content.delta') return;
+        const toolName = typeof event.toolName === 'string' ? event.toolName : '';
+        const title = typeof event.title === 'string' ? event.title : '';
+        const detail = toolName || title
+          ? [toolName, title].filter(Boolean).join(' · ')
+          : String(event.summary ?? event.text ?? event.message ?? event.delta ?? '');
+        pushTrace({
+          at: event.createdAt,
+          threadId: event.threadId,
+          type: event.type,
+          detail,
         });
       });
 
       source.addEventListener('error', () => {
+        const seen = source?.lastEventId() ?? '';
+        if (seen) lastSeq.current = seen;
         dispatch({ type: 'connected', value: false });
         source?.close();
         if (closed) return;
@@ -590,7 +680,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<StoreValue>(
-    () => ({ state, dispatch, loadThread, refreshBots, refreshInstances, refreshConfig, refreshRoutines, refreshOrgGraph }),
+    () => ({
+      state,
+      dispatch,
+      loadThread,
+      refreshBots,
+      refreshInstances,
+      refreshConfig,
+      refreshRoutines,
+      refreshWorkflows,
+      refreshJobs,
+      refreshOrgGraph,
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state],
   );

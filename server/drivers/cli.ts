@@ -14,7 +14,7 @@ import type {
   TurnIntegrations,
 } from '../contracts.ts';
 import { NO_CAPABILITIES } from '../contracts.ts';
-import { appendNdjson, dataPath } from '../paths.ts';
+import { appendNdjsonLimited, threadLogPath } from '../paths.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -253,13 +253,32 @@ function extractText(node: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/**
+ * Label for the work line. A path's last two segments, or the first line of a
+ * command. Never the file body: `content` stays off the status line.
+ */
+export function toolTraceTitle(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const rec = input as Record<string, unknown>;
+  const file = typeof rec.file_path === 'string' ? rec.file_path : typeof rec.path === 'string' ? rec.path : '';
+  if (file.trim()) {
+    const parts = file.split(/[\\/]/).filter(Boolean);
+    const label = parts.slice(-2).join('/');
+    return label || undefined;
+  }
+  const command = typeof rec.command === 'string' ? rec.command : '';
+  const head = command.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  if (!head) return undefined;
+  return head.length > 80 ? `${head.slice(0, 79)}…` : head;
+}
+
 function extractToolUses(node: Record<string, unknown>): { id?: string; name: string; title?: string }[] {
   const message = (node.message ?? node) as Record<string, unknown>;
   const content = message.content;
   if (!Array.isArray(content)) return [];
   return content
     .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object' && (c as any).type === 'tool_use')
-    .map((c) => ({ id: str(c.id), name: str(c.name) ?? 'tool', title: str((c.input as any)?.command) }));
+    .map((c) => ({ id: str(c.id), name: str(c.name) ?? 'tool', title: toolTraceTitle(c.input) }));
 }
 
 function readUsage(v: unknown): { input: number; output: number; cachedInput?: number; costUsd?: number } | null {
@@ -458,7 +477,7 @@ class CliAdapter implements ProviderAdapter {
     this.emit(state, { type: 'turn.started' });
 
     const parse = this.spec.parse ?? defaultParse;
-    const nativeLog = dataPath('native', `${input.threadId}.ndjson`);
+    const nativeLog = threadLogPath('native', input.threadId);
 
     child.stdout.on(
       'data',
@@ -469,7 +488,7 @@ class CliAdapter implements ProviderAdapter {
         } catch {
           return; // Vendors print banners and progress noise on stdout; ignore non-JSON.
         }
-        appendNdjson(nativeLog, { at: Date.now(), dir: 'in', source: this.spec.kind, msg: json });
+        if (nativeLog) appendNdjsonLimited(nativeLog, { at: Date.now(), dir: 'in', source: this.spec.kind, msg: json });
         for (const partial of parse(json, state)) {
           if (partial.type === 'request.opened' && partial.requestId) live.openRequests.add(partial.requestId);
           if (partial.type === 'request.resolved' && partial.requestId) live.openRequests.delete(partial.requestId);

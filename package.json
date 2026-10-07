@@ -21,7 +21,7 @@
     "lint": "oxlint server src scripts",
     "check:contrast": "node scripts/check-skin-contrast.mjs",
     "i18n:check": "node --experimental-strip-types scripts/i18n-check.mjs",
-    "check:electron": "node --check electron/main.mjs && node --check electron/preload.cjs",
+    "check:electron": "node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/tray-icon.mjs",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "build:server": "node scripts/bundle-server.mjs",
     "build:hermes-plugin": "node scripts/build-hermes-plugin.mjs",
@@ -76,7 +76,8 @@
       "target": [
         "nsis",
         "zip"
-      ]
+      ],
+      "signAndEditExecutable": false
     },
     "linux": {
       "target": [

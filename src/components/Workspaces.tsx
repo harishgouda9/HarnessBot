@@ -40,7 +40,7 @@ function WorkspaceHeader({
   const { dispatch } = useStore();
   return (
     <header className="flex flex-wrap items-center gap-2 border-b px-4 py-2 hairline" style={{ background: 'var(--color-panel)' }}>
-      <Avatar name={bot.name} color={bot.color} activity={bot.activity} size={26} />
+      <Avatar name={bot.name} color={bot.color} activity={bot.activity} avatarShape={bot.avatarShape} size={26} />
       <div className="min-w-0">
         <div className="truncate text-[14px] font-semibold">{title}</div>
         {subtitle ? (

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { RoutineRun } from '../../shared/types.ts';
+import type { Routine, RoutineRun } from '../../shared/types.ts';
 import { api } from '../api.ts';
 import { useStore } from '../store.tsx';
+import { PageHeader } from './PageHeader.tsx';
 
 /** The routines calendar. Skills, the org canvas, and connected apps have their own files. */
 
@@ -9,21 +10,34 @@ const inputStyle = { background: 'var(--color-inset)', color: 'var(--color-ink)'
 
 const STATUS_TONE: Record<string, string> = {
   completed: 'var(--color-success)',
-  running: 'var(--color-accent)',
+  running: 'var(--color-success)',
   queued: 'var(--color-ink-secondary)',
   waiting: 'var(--color-warning)',
   failed: 'var(--color-danger)',
   cancelled: 'var(--color-ink-secondary)',
   missed: 'var(--color-danger)',
+  'catch-up': 'var(--color-warning)',
 };
 
-function PageHeader({ title, children }: { title: string; children?: React.ReactNode }) {
-  return (
-    <header className="flex items-center gap-2 border-b px-4 py-3 hairline" style={{ background: 'var(--color-panel)' }}>
-      <h1 className="flex-1 text-[15px] font-semibold">{title}</h1>
-      {children}
-    </header>
-  );
+type ListedRoutine = Routine & { spend?: { spentUsd: number; capUsd: number | null; verdict: 'allow' | 'warn' | 'block' } };
+
+const REVIEW_STATUS = new Set(['completed', 'failed', 'catch-up', 'waiting']);
+
+function routineJobHint(jobs: { id: string; status: string }[], jobId: string | undefined): string {
+  if (!jobId) return '';
+  const job = jobs.find((item) => item.id === jobId);
+  if (!job || job.status === 'queued' || job.status === 'active') return ' · runs a job';
+  if (job.status === 'blocked') return ' · job blocked';
+  if (job.status === 'done') return ' · job finished';
+  if (job.status === 'handed-off') return ' · job handed off';
+  return ' · job cancelled';
+}
+
+function describeSchedule(schedule: Routine['schedule']): string {
+  if (schedule.kind === 'daily') return `${schedule.time} on ${schedule.weekdays.length || 5} day(s)`;
+  if (schedule.kind === 'interval') return `every ${schedule.everyMinutes} min`;
+  if (schedule.kind === 'monthly') return `day ${schedule.day} at ${schedule.time}`;
+  return new Date(schedule.at).toLocaleString();
 }
 
 export function RoutineCalendarPage() {
@@ -74,7 +88,7 @@ export function RoutineCalendarPage() {
           <div className="mx-auto mt-20 max-w-sm text-center">
             <div className="text-[15px] font-semibold">Nothing scheduled</div>
             <div className="mt-1 text-[13px]" style={{ color: 'var(--color-ink-secondary)' }}>
-              A routine starts a fresh task on a bot, on a weekday schedule or once. HarnessBot has to be running when it is due.
+              A routine starts a fresh task on a bot. If it comes due while HarnessBot is closed, it waits here until you confirm it.
             </div>
             <button type="button" onClick={() => setCreating(true)} className="mt-3 rounded-lg px-3 py-1.5 text-[13px]" style={{ background: 'var(--color-accent)', color: 'var(--color-accent-ink)' }}>
               Schedule the first one
@@ -103,15 +117,66 @@ export function RoutineCalendarPage() {
               })}
             </div>
 
+            <h2 className="mt-6 text-[13px] font-semibold">To review</h2>
+            {runs.filter((run) => REVIEW_STATUS.has(run.status)).length === 0 ? (
+              <div className="mt-2 text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
+                Completed, failed, catch-up, and spend-capped runs show up here. A catch-up does not start until you confirm it.
+              </div>
+            ) : (
+              runs
+                .filter((run) => REVIEW_STATUS.has(run.status))
+                .map((run) => (
+                  <div key={run.id} className="card mt-2 p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: STATUS_TONE[run.status] ?? 'var(--color-ink-secondary)' }} />
+                      <span className="flex-1 text-[13px] font-medium">{run.routineName}</span>
+                      <span className="text-[11px]" style={{ color: 'var(--color-ink-secondary)' }}>{run.status}</span>
+                    </div>
+                    {run.output ? (
+                      <p className="mt-1 text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>{run.output.slice(0, 280)}</p>
+                    ) : null}
+                    <div className="mt-2 flex gap-2">
+                      {run.status === 'catch-up' ? (
+                        <button
+                          type="button"
+                          onClick={() => void api.post(`/api/routines/runs/${run.id}/confirm`).then(refreshRoutines)}
+                          className="rounded-lg px-2 py-1 text-[12px]"
+                          style={{ background: 'var(--color-accent)', color: 'var(--color-accent-ink)' }}
+                        >
+                          Run catch-up
+                        </button>
+                      ) : null}
+                      {run.status === 'waiting' ? (
+                        <button
+                          type="button"
+                          onClick={() => void api.post(`/api/routines/${run.routineId}/spend-confirm`).then(refreshRoutines)}
+                          className="rounded-lg px-2 py-1 text-[12px]"
+                          style={{ background: 'var(--color-accent)', color: 'var(--color-accent-ink)' }}
+                        >
+                          Confirm spend
+                        </button>
+                      ) : null}
+                      <button type="button" onClick={() => dispatch({ type: 'select', selected: { kind: 'bot', id: run.botId } })} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-raised)' }}>
+                        Open bot
+                      </button>
+                    </div>
+                  </div>
+                ))
+            )}
+
             <h2 className="mt-6 text-[13px] font-semibold">Schedules</h2>
-            {state.routines.map((routine) => (
+            {(state.routines as ListedRoutine[]).map((routine) => (
               <div key={routine.id} className="card mt-2 flex items-center gap-3 p-3">
                 <span className="flex-1">
                   <span className="block text-[13px] font-medium">{routine.name}</span>
                   <span className="block text-[11px]" style={{ color: 'var(--color-ink-secondary)' }}>
                     {state.bots.find((b) => b.id === routine.botId)?.name ?? 'missing bot'} ·{' '}
-                    {routine.schedule.kind === 'daily' ? `${routine.schedule.time} on ${routine.schedule.weekdays.length} day(s)` : new Date(routine.schedule.at).toLocaleString()}
+                    {describeSchedule(routine.schedule)}
+                    {routine.spendCapUsd ? ` · cap $${routine.spendCapUsd}` : ''}
+                    {routine.spend?.verdict === 'warn' ? ` · approaching cap ($${routine.spend.spentUsd.toFixed(2)})` : ''}
+                    {routine.spend?.verdict === 'block' ? ` · cap reached ($${routine.spend.spentUsd.toFixed(2)})` : ''}
                     {routine.nextRunAt ? ` · next ${new Date(routine.nextRunAt).toLocaleString()}` : ' · paused'}
+                    {routineJobHint(state.jobs, routine.jobId)}
                   </span>
                 </span>
                 <label className="flex items-center gap-1 text-[12px]">
@@ -151,7 +216,18 @@ function RunRow({ run, onOpen }: { run: RoutineRun; onOpen: () => void }) {
 
 function NewRoutine({ onClose, onCreated }: { onClose: () => void; onCreated: () => Promise<void> }) {
   const { state } = useStore();
-  const [form, setForm] = useState({ name: '', prompt: '', botId: state.bots[0]?.id ?? '', kind: 'daily', time: '09:00', weekdays: [1, 2, 3, 4, 5], durationMinutes: 30 });
+  const [form, setForm] = useState({
+    name: '',
+    prompt: '',
+    botId: state.bots[0]?.id ?? '',
+    kind: 'daily',
+    time: '09:00',
+    weekdays: [1, 2, 3, 4, 5],
+    everyMinutes: 60,
+    day: 1,
+    durationMinutes: 30,
+    spendCapUsd: '',
+  });
 
   return (
     <div className="fixed inset-0 z-40 grid place-items-center p-4" style={{ background: '#0009' }} onClick={onClose}>
@@ -170,6 +246,8 @@ function NewRoutine({ onClose, onCreated }: { onClose: () => void; onCreated: ()
           <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} className="rounded-lg px-2 py-1.5 text-[13px]" style={inputStyle}>
             <option value="daily">Weekdays</option>
             <option value="once">Once</option>
+            <option value="interval">Interval</option>
+            <option value="monthly">Monthly</option>
           </select>
           <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} className="rounded-lg px-2 py-1.5 text-[13px]" style={inputStyle} />
         </div>
@@ -188,6 +266,46 @@ function NewRoutine({ onClose, onCreated }: { onClose: () => void; onCreated: ()
             ))}
           </div>
         ) : null}
+        {form.kind === 'interval' ? (
+          <label className="mt-2 block text-[12px]">
+            Every
+            <input
+              type="number"
+              min={1}
+              value={form.everyMinutes}
+              onChange={(e) => setForm({ ...form, everyMinutes: Number(e.target.value) })}
+              className="ml-2 w-24 rounded-lg px-2 py-1.5 text-[13px]"
+              style={inputStyle}
+            />
+            <span className="ml-1">minutes</span>
+          </label>
+        ) : null}
+        {form.kind === 'monthly' ? (
+          <label className="mt-2 block text-[12px]">
+            Day of month
+            <input
+              type="number"
+              min={1}
+              max={31}
+              value={form.day}
+              onChange={(e) => setForm({ ...form, day: Number(e.target.value) })}
+              className="ml-2 w-20 rounded-lg px-2 py-1.5 text-[13px]"
+              style={inputStyle}
+            />
+          </label>
+        ) : null}
+        <label className="mt-2 block text-[12px]">
+          Spend cap (USD, optional)
+          <input
+            type="number"
+            min={0}
+            step="0.5"
+            value={form.spendCapUsd}
+            onChange={(e) => setForm({ ...form, spendCapUsd: e.target.value })}
+            className="mt-1 w-full rounded-lg px-2 py-1.5 text-[13px]"
+            style={inputStyle}
+          />
+        </label>
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-lg px-3 py-1.5 text-[13px]" style={{ background: 'var(--color-raised)' }}>
             Cancel
@@ -200,12 +318,22 @@ function NewRoutine({ onClose, onCreated }: { onClose: () => void; onCreated: ()
               const at = new Date();
               at.setHours(hh ?? 9, mm ?? 0, 0, 0);
               if (at.getTime() < Date.now()) at.setDate(at.getDate() + 1);
+              const cap = Number(form.spendCapUsd);
+              const schedule =
+                form.kind === 'daily'
+                  ? { kind: 'daily', time: form.time, weekdays: form.weekdays }
+                  : form.kind === 'interval'
+                    ? { kind: 'interval', everyMinutes: form.everyMinutes }
+                    : form.kind === 'monthly'
+                      ? { kind: 'monthly', day: form.day, time: form.time }
+                      : { kind: 'once', at: at.getTime() };
               await api.post('/api/routines', {
                 name: form.name || 'Routine',
                 prompt: form.prompt,
                 botId: form.botId,
                 durationMinutes: form.durationMinutes,
-                schedule: form.kind === 'daily' ? { kind: 'daily', time: form.time, weekdays: form.weekdays } : { kind: 'once', at: at.getTime() },
+                schedule,
+                spendCapUsd: Number.isFinite(cap) && cap > 0 ? cap : undefined,
               });
               await onCreated();
               onClose();

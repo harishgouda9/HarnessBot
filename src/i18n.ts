@@ -23,6 +23,7 @@ const en: Catalog = {
   'app.openDesktop': 'Open desktop',
   'app.working': 'Working',
   'app.waiting': 'Waiting on you',
+  'app.needsYou': 'Needs you',
   'app.idle': 'Idle',
   'noEngines.title': 'No agent CLI found',
   'noEngines.body':

@@ -73,6 +73,22 @@ describe('registry', () => {
     expect(snapshot!.models).toHaveLength(0);
   });
 
+  it('a failed reload does not poison the next one', async () => {
+    const registry = await registryWith({ one: { driver: 'fake' } });
+    const adapter = registry.get('one')!;
+    adapter.dispose = (() => {
+      throw new Error('dispose exploded');
+    }) as typeof adapter.dispose;
+    saveConfig({ instances: { one: { driver: 'fake', displayName: 'Second' } } });
+    await expect(registry.reload()).rejects.toThrow(/dispose exploded/);
+
+    adapter.dispose = async () => {};
+    saveConfig({ instances: { one: { driver: 'fake', displayName: 'Third' } } });
+    await registry.reload();
+    const snapshots = await registry.snapshots();
+    expect(snapshots.find((snapshot) => snapshot.instanceId === 'one')?.displayName).toBe('Third');
+  });
+
   it('merges user-added models onto a live catalogue without duplicating ids', async () => {
     const registry = await registryWith({
       one: {

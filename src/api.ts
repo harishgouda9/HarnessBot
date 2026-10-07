@@ -105,12 +105,15 @@ export async function speak(text: string, voice?: string): Promise<HTMLAudioElem
 export interface EventStream {
   addEventListener(name: string, handler: (event: { data: string }) => void): void;
   close(): void;
+  /** Last SSE `id:` seen on this connection. Empty until a frame carries one. */
+  lastEventId(): string;
 }
 
 export function streamEvents(path: string): EventStream {
   const listeners = new Map<string, ((event: { data: string }) => void)[]>();
   const controller = new AbortController();
   let closed = false;
+  let lastId = '';
 
   const emit = (name: string, data: string): void => {
     for (const handler of listeners.get(name) ?? []) handler({ data });
@@ -142,7 +145,8 @@ export function streamEvents(path: string): EventStream {
           let name = 'message';
           const data: string[] = [];
           for (const line of frame.split('\n')) {
-            if (line.startsWith('event:')) name = line.slice(6).trim();
+            if (line.startsWith('id:')) lastId = line.slice(3).trim();
+            else if (line.startsWith('event:')) name = line.slice(6).trim();
             else if (line.startsWith('data:')) data.push(line.slice(5).trim());
             // ':' lines are comments — the keep-alive ping arrives as one.
           }
@@ -167,5 +171,6 @@ export function streamEvents(path: string): EventStream {
       closed = true;
       controller.abort();
     },
+    lastEventId: () => lastId,
   };
 }

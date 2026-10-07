@@ -1,17 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from './api.ts';
 import { setLocale } from './i18n.ts';
-import { noEngines, selectedBot, selectedGroup, useStore } from './store.tsx';
+import { jumpToThread, noEngines, selectedBot, selectedGroup, useStore } from './store.tsx';
 import { ChatView, GroupView } from './components/Chat.tsx';
 import { ChatDrawer } from './components/ChatDrawer.tsx';
 import { BotSettingsPanel, ComputerPanel, InspectorPanel, MemoryPanel } from './components/Panels.tsx';
+import { HistoryPage } from './components/History.tsx';
 import { RoutineCalendarPage } from './components/Pages.tsx';
+import { WorkflowsPage } from './components/Workflows.tsx';
 import { SkillRecorderPage, SkillsPage } from './components/Skills.tsx';
 import { PluginsPanel } from './components/Plugins.tsx';
 import { TeamMapPage } from './components/TeamMap.tsx';
 import { BrowserWorkspace, LocalVmWorkspace } from './components/Workspaces.tsx';
 import { CallView, CommandPalette, NewBotDialog, NoEngines, NotificationCentre, Onboarding } from './components/Overlays.tsx';
 import { SettingsModal } from './components/Settings.tsx';
+import { BusyStrip } from './components/BusyStrip.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { UsageChip } from './components/UsageChip.tsx';
 import { Icon } from './components/Icons.tsx';
@@ -39,7 +42,9 @@ function harnessLabel(
 const MOBILE_BREAKPOINT = 768;
 
 export function App() {
-  const { state, dispatch } = useStore();
+  const store = useStore();
+  const { state, dispatch } = store;
+  const seenNotice = useRef<string | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
   const [appSettings, setAppSettings] = useState(false);
   const [newBot, setNewBot] = useState(false);
@@ -86,6 +91,27 @@ export function App() {
     document.title = unread ? `(${unread}) HarnessBot` : 'HarnessBot';
     void window.hb?.setBadge?.(unread);
   }, [state.bots, state.groups]);
+
+  // A harness notice becomes a native notification. The click handler opens that bot and task.
+  useEffect(() => {
+    const notice = state.notifications[0];
+    if (!notice || notice.id === seenNotice.current) return;
+    seenNotice.current = notice.id;
+    void window.hb?.notify?.({
+      botId: notice.botId,
+      botName: notice.botName,
+      threadId: notice.threadId,
+      taskTitle: notice.taskTitle || 'Task',
+      kind: notice.kind,
+      preview: notice.preview,
+    });
+  }, [state.notifications]);
+
+  useEffect(() => {
+    return window.hb?.onOpenThread?.((target) => {
+      void jumpToThread(store, target.threadId, target.botId);
+    });
+  }, [store]);
 
   // Select something as soon as there is something to select.
   useEffect(() => {
@@ -148,7 +174,7 @@ export function App() {
     return <Onboarding onDone={() => void 0} />;
   }
 
-  const openView = (view: 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder'): void => {
+  const openView = (view: 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder' | 'history' | 'workflows'): void => {
     dispatch({ type: 'view', view });
     setDrawerOpen(false);
   };
@@ -164,6 +190,10 @@ export function App() {
     switch (state.view) {
       case 'calendar':
         return <RoutineCalendarPage />;
+      case 'history':
+        return <HistoryPage />;
+      case 'workflows':
+        return <WorkflowsPage />;
       case 'skills':
         return <SkillsPage />;
       case 'recorder':
@@ -261,8 +291,9 @@ export function App() {
         {barButton('search', 'Search', () => setPalette(true))}
         {barButton('gear', 'Settings', () => setAppSettings(true))}
       </header>
+      <BusyStrip />
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         {narrow ? (
           <>
             {drawerOpen ? (
@@ -283,12 +314,30 @@ export function App() {
         {railBot && panel === 'memory' ? <MemoryPanel bot={railBot} onClose={() => setPanel(null)} /> : null}
         {railBot && panel === 'settings' ? <BotSettingsPanel bot={railBot} onClose={() => setPanel(null)} /> : null}
 
-        {/* Beside the page, not instead of it. On a narrow window it covers the right edge. */}
-        {state.view !== 'chat' && state.drawerBotId ? (
+        {/*
+         * Team-map Chat stays on the map. The conversation slides over the right
+         * edge; it does not replace the chart with the full chat page. Opening a
+         * bot from the roster still uses the full chat view.
+         */}
+        {state.view === 'team' && state.drawerBotId ? (
+          <>
+            <div
+              className="absolute inset-0 z-30"
+              style={{ background: '#0004' }}
+              onClick={() => dispatch({ type: 'drawer', botId: null })}
+            />
+            <div
+              className="anim-drawer absolute inset-y-0 right-0 z-40 flex max-w-full"
+              style={{ boxShadow: '-12px 0 32px #0000002e' }}
+            >
+              <ChatDrawer />
+            </div>
+          </>
+        ) : state.view !== 'chat' && state.drawerBotId ? (
           narrow ? (
             <>
               <div className="fixed inset-0 z-30" style={{ background: '#0009' }} onClick={() => dispatch({ type: 'drawer', botId: null })} />
-              <div className="fixed inset-y-0 right-0 z-40 flex max-w-full" style={{ width: 'min(100%, 420px)' }}>
+              <div className="anim-drawer fixed inset-y-0 right-0 z-40 flex max-w-full" style={{ width: 'min(100%, 420px)' }}>
                 <ChatDrawer />
               </div>
             </>
@@ -308,6 +357,13 @@ export function App() {
 
 declare global {
   interface Window {
-    hb?: { setBadge?: (count: number) => void };
+    hb?: {
+      platform?: string;
+      setBadge?: (count: number) => void;
+      notify?: (notice: { botId: string; botName: string; threadId: string; taskTitle: string; kind: string; preview: string }) => Promise<{ shown: boolean; reason?: string }>;
+      onOpenThread?: (cb: (target: { botId: string; threadId: string }) => void) => () => void;
+      getPresence?: () => Promise<{ tray: boolean; openAtLogin: boolean; platform: string }>;
+      setPresence?: (patch: { tray?: boolean; openAtLogin?: boolean }) => Promise<{ tray: boolean; openAtLogin: boolean; platform: string }>;
+    };
   }
 }

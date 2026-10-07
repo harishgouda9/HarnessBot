@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BOT_COLORS, type BotRecord, type ComputerPlacement, type HarnessbotColor, type MemoryEntry } from '../../shared/types.ts';
+import { activityBeats } from '../../shared/activity.ts';
+import type { ActivityBeat } from '../../shared/types.ts';
+import { AVATAR_SHAPES, AVATAR_SHAPE_LABELS, BOT_COLORS, type BotRecord, type ComputerPlacement, type HarnessbotColor, type MemoryEntry } from '../../shared/types.ts';
 import { api, uploadAttachment } from '../api.ts';
+import { approvalPost, phoneGateAfterApprove, phoneGateAfterAsk, type PhoneGate } from '../phone-gate.ts';
+import { useStreaming, useTrace } from '../stream-store.ts';
 import { snapshotFor, useStore } from '../store.tsx';
 import { Avatar, botColor } from './Avatar.tsx';
 import { Icon } from './Icons.tsx';
+import { BotJobs } from './Jobs.tsx';
 import { EngineRow } from './Overlays.tsx';
 
 /**
@@ -24,6 +29,63 @@ const Row = ({ label, children, hint }: { label: string; children: React.ReactNo
 );
 
 const input = { background: 'var(--color-inset)', color: 'var(--color-ink)', border: '1px solid var(--color-hairline)' } as const;
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Commands, exit codes, and files for the open task. Paths and sizes only. */
+function ActivityStrip({ threadId }: { threadId: string }) {
+  const { state } = useStore();
+  const [remote, setRemote] = useState<ActivityBeat[] | null>(null);
+  const local = activityBeats(state.threads[threadId]?.messages ?? []);
+  const mark = (state.threads[threadId]?.messages.length ?? 0) + (state.threads[threadId]?.messages.at(-1)?.at ?? 0);
+
+  useEffect(() => {
+    let gone = false;
+    void api
+      .get<ActivityBeat[]>(`/api/threads/${threadId}/activity`)
+      .then((beats) => {
+        if (!gone) setRemote(beats);
+      })
+      .catch(() => {
+        if (!gone) setRemote(null);
+      });
+    return () => {
+      gone = true;
+    };
+  }, [threadId, mark]);
+
+  const shown = (remote ?? local).slice(-12).reverse();
+  return (
+    <div className="mx-3 mt-3">
+      <div className="text-[12px] font-medium">This task</div>
+      <p className="mt-0.5 text-[11px]" style={{ color: 'var(--color-ink-secondary)' }}>
+        Commands, exit codes, and files. A file shows its path and size. The decision log is the record that lasts.
+      </p>
+      {shown.length === 0 ? (
+        <div className="mt-1 text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
+          No commands or files in this task yet.
+        </div>
+      ) : (
+        <ul className="mt-1 flex flex-col gap-1">
+          {shown.map((beat, index) => (
+            <li key={`${beat.at}:${index}`} className="rounded-lg px-2 py-1 text-[11px]" style={{ background: 'var(--color-inset)' }}>
+              <span className="font-mono">{beat.tool}</span>
+              {beat.exitCode !== undefined ? (
+                <span style={{ color: beat.exitCode === 0 ? 'var(--color-success)' : 'var(--color-danger)' }}> · exit {beat.exitCode}</span>
+              ) : null}
+              {beat.path ? <span className="mt-0.5 block truncate">{beat.path}{beat.bytes !== undefined ? ` · ${formatBytes(beat.bytes)}` : ''}</span> : null}
+              {beat.command ? <span className="mt-0.5 block truncate">{beat.command}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -133,6 +195,7 @@ export function ComputerPanel({ bot, onClose }: { bot: BotRecord; onClose: () =>
           </div>
         ) : tab === 'computer' ? (
           <>
+            <ActivityStrip threadId={bot.threadId} />
             {host?.hermes ? (
               <div className="mx-3 mt-3 rounded-lg p-3 text-[12px]" style={{ background: 'var(--color-inset)' }}>
                 <div className="font-medium">Hermes has no computer-use. This bot still can.</div>
@@ -362,25 +425,7 @@ export function ComputerPanel({ bot, onClose }: { bot: BotRecord; onClose: () =>
             )}
           </>
         ) : (
-          <div className="m-3 rounded-lg p-3 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink-secondary)' }}>
-            <div className="font-medium" style={{ color: 'var(--color-ink)' }}>
-              Physical Android control
-            </div>
-            <p className="mt-1">
-              This drives a real phone over authorised USB debugging. It is device control, not a
-              companion app — there is nothing to install on the phone beyond enabling developer mode.
-            </p>
-            <ol className="mt-2 list-decimal pl-4">
-              <li>Enable Developer options and USB debugging on the phone.</li>
-              <li>Plug it in and accept the debugging prompt.</li>
-              <li>Install the Phone Harness skill for this bot from the Skills page.</li>
-            </ol>
-            <p className="mt-2" style={{ color: 'var(--color-warning)' }}>
-              {snapshot?.capabilities.phoneMcp
-                ? 'A phone is somebody’s actual phone. Payments, messages, and deletions still stop for approval.'
-                : 'This engine does not declare phone support, so the tools will not be mounted.'}
-            </p>
-          </div>
+          <PhoneDevices canMount={snapshot?.capabilities.phoneMcp === true} />
         )}
       </div>
     </aside>
@@ -396,10 +441,109 @@ interface PersistedEvent {
   message?: string;
 }
 
+export interface PhoneList {
+  available: boolean;
+  reason?: string;
+  devices: { serial: string; state: string; screenshot: { mime: string; png: string; at: number } | null }[];
+}
+
+function PhoneDevices({ canMount }: { canMount: boolean }) {
+  const [list, setList] = useState<PhoneList | null>(null);
+  const [gate, setGate] = useState<PhoneGate | null>(null);
+
+  const refresh = (): void => {
+    void api.get<PhoneList>('/api/phone').then(setList).catch(() => setList({ available: false, reason: 'Could not ask the harness about phones.', devices: [] }));
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  return (
+    <div className="m-3 rounded-lg p-3 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink-secondary)' }}>
+      <div className="font-medium" style={{ color: 'var(--color-ink)' }}>
+        Physical Android
+      </div>
+      {!canMount ? (
+        <p className="mt-1">This engine does not declare phone support, so the tools will not be mounted.</p>
+      ) : null}
+      {list && !list.available ? (
+        <p className="mt-2" style={{ color: 'var(--color-warning)' }}>
+          {list.reason}
+        </p>
+      ) : null}
+      {list?.available && list.devices.length === 0 ? (
+        <p className="mt-2">No phone is connected. Plug one in and accept USB debugging.</p>
+      ) : null}
+      {list?.devices.map((device) => (
+        <div key={device.serial} className="mt-3">
+          <div className="font-medium" style={{ color: 'var(--color-ink)' }}>
+            {device.serial}
+          </div>
+          <div>{device.state}</div>
+          {device.screenshot ? (
+            <img src={`data:${device.screenshot.mime};base64,${device.screenshot.png}`} alt={`Screenshot of ${device.serial}`} className="mt-2 w-full rounded-lg" />
+          ) : (
+            <div className="mt-2">No screenshot yet.</div>
+          )}
+          {device.state === 'device' ? (
+            <button
+              type="button"
+              className="mt-2 rounded-lg px-2 py-1"
+              style={{ background: 'var(--color-raised)', color: 'var(--color-ink)' }}
+              onClick={() => void api.post<PhoneList['devices'][number]>(`/api/phone/${encodeURIComponent(device.serial)}/screenshot`).then(refresh)}
+            >
+              Take screenshot
+            </button>
+          ) : null}
+        </div>
+      ))}
+      <div className="mt-3 font-medium" style={{ color: 'var(--color-ink)' }}>
+        Send, pay, or delete
+      </div>
+      <p className="mt-1">These do not run until you approve them. The harness does not invent an approval.</p>
+      <div className="mt-2 flex gap-1">
+        {(['send', 'pay', 'delete'] as const).map((action) => (
+          <button
+            key={action}
+            type="button"
+            className="rounded-lg px-2 py-1 capitalize"
+            style={{ background: 'var(--color-raised)', color: 'var(--color-ink)' }}
+            onClick={() => {
+              void api.post<{ allowed: boolean; reason?: string }>('/api/phone/actions', { action, approved: false }).then((result) => {
+                setGate(phoneGateAfterAsk(action, result));
+              });
+            }}
+          >
+            {action}
+          </button>
+        ))}
+      </div>
+      {gate ? (
+        <div className="mt-2">
+          <p>{gate.note}</p>
+          <button
+            type="button"
+            className="mt-1 rounded-lg px-2 py-1"
+            style={{ background: 'var(--color-accent)', color: 'var(--color-accent-ink)' }}
+            onClick={() => {
+              const pending = gate;
+              void api.post<{ allowed: boolean; reason?: string }>('/api/phone/actions', approvalPost(pending)).then((result) => {
+                setGate(phoneGateAfterApprove(pending, result));
+              });
+            }}
+          >
+            Approve this action
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function InspectorPanel({ bot, onClose }: { bot: BotRecord; onClose: () => void }) {
-  const { state } = useStore();
-  const trace = state.trace.filter((item) => item.threadId === bot.threadId);
-  const streaming = state.streaming[bot.threadId];
+  const trace = useTrace(bot.threadId);
+  const streaming = useStreaming(bot.threadId);
   const task = (bot.tasks ?? []).find((t) => t.threadId === bot.threadId);
   const [history, setHistory] = useState<PersistedEvent[] | null>(null);
 
@@ -752,7 +896,7 @@ function BotProfile({ bot, onSave }: { bot: BotRecord; onSave: (patch: Partial<B
   return (
     <section className="border-b px-3 py-3 hairline">
       <div className="flex items-center gap-3">
-        <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} size={54} />
+        <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} avatarShape={bot.avatarShape} size={54} />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-semibold">{bot.name}</div>
           <div className="truncate text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
@@ -789,6 +933,31 @@ function BotProfile({ bot, onSave }: { bot: BotRecord; onSave: (patch: Partial<B
           {error}
         </div>
       ) : null}
+
+      <span className="mt-3 block text-[12px] font-medium">Shape</span>
+      <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="Bot shape">
+        {AVATAR_SHAPES.map((shape) => {
+          const chosen = (bot.avatarShape ?? 'rounded') === shape;
+          const label = AVATAR_SHAPE_LABELS[shape];
+          return (
+            <button
+              key={shape}
+              type="button"
+              title={label}
+              aria-label={label}
+              aria-pressed={chosen}
+              onClick={() => void save({ avatarShape: shape })}
+              className="grid h-9 w-9 place-items-center rounded-lg"
+              style={{
+                background: 'var(--color-raised)',
+                boxShadow: chosen ? '0 0 0 2px var(--color-panel), 0 0 0 4px var(--color-focus)' : undefined,
+              }}
+            >
+              <Avatar name={label} color={bot.color} avatarShape={shape} size={26} decorative />
+            </button>
+          );
+        })}
+      </div>
 
       <span className="mt-3 block text-[12px] font-medium">Colour</span>
       <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -851,7 +1020,7 @@ export function BotSettingsPanel({ bot, onClose }: { bot: BotRecord; onClose: ()
   return (
     <aside className="anim-panel flex w-[360px] shrink-0 flex-col border-l hairline" style={{ background: 'var(--color-panel)' }}>
       <header className="flex items-center gap-2 border-b px-3 py-2 hairline">
-        <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} size={22} />
+        <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} avatarShape={bot.avatarShape} size={22} />
         <span className="flex-1 text-[13px] font-semibold">{bot.name}</span>
         <button type="button" onClick={onClose} title="Close" aria-label="Close bot settings" className="grid h-6 w-6 place-items-center rounded-lg" style={{ color: 'var(--color-ink-secondary)' }}>
           <Icon name="close" size={14} />
@@ -891,6 +1060,7 @@ export function BotSettingsPanel({ bot, onClose }: { bot: BotRecord; onClose: ()
             />
           </Row>
         ) : null}
+        <BotJobs bot={bot} />
         <Row label="Section">
           <input defaultValue={bot.section ?? ''} onBlur={(e) => save({ section: e.target.value || undefined })} className="w-full rounded-lg px-2 py-1.5 text-[13px]" style={input} />
         </Row>
@@ -1002,6 +1172,20 @@ export function BotSettingsPanel({ bot, onClose }: { bot: BotRecord; onClose: ()
         {snapshot?.capabilities.customMcp ? (
           <Toggle checked={bot.customMcp !== false} onChange={(v) => save({ customMcp: v })} label="Custom MCP servers" />
         ) : null}
+        <Row label="Spend cap (USD)" hint="Warns as usage approaches the cap and stops the next turn until you confirm.">
+          <input
+            type="number"
+            min={0}
+            step="0.5"
+            value={bot.spendCapUsd ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value;
+              void api.patch(`/api/bots/${bot.id}`, { spendCapUsd: raw === '' ? null : Number(raw) });
+            }}
+            className="w-full rounded-lg px-2 py-1.5 text-[13px]"
+            style={input}
+          />
+        </Row>
         <Toggle checked={bot.notifications !== false} onChange={(v) => save({ notifications: v })} label="Notifications" />
         <Toggle checked={bot.speakReplies === true} onChange={(v) => save({ speakReplies: v })} label="Speak replies (uses ElevenLabs credit)" />
 

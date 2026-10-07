@@ -528,7 +528,7 @@ export function EngineSwitcher({ bot, onClose }: { bot: BotRecord; onClose: () =
   return (
     <Modal onClose={onClose} label={`Engine for ${bot.name}`}>
       <div className="flex items-center gap-2">
-        <Avatar name={bot.name} color={bot.color} size={28} />
+        <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={28} />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-semibold">{bot.name}</div>
           <div className="truncate text-[12px]" style={{ color: 'var(--color-ink-secondary)' }}>
@@ -689,7 +689,7 @@ export function NewBotDialog({ onClose, onCreated }: { onClose: () => void; onCr
               .map((bot) => (
                 <label key={bot.id} className="flex items-center gap-2 px-1 py-1 text-[13px]">
                   <input type="checkbox" checked={members.includes(bot.id)} onChange={(e) => setMembers(e.target.checked ? [...members, bot.id] : members.filter((id) => id !== bot.id))} />
-                  <Avatar name={bot.name} color={bot.color} size={22} />
+                  <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={22} />
                   {bot.name}
                 </label>
               ))}
@@ -812,10 +812,23 @@ function TeamImport({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** Local midnight or end-of-day for a `YYYY-MM-DD` input. Invalid text is no bound. */
+function dayBound(value: string, end: boolean): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), end ? 23 : 0, end ? 59 : 0, end ? 59 : 0, end ? 999 : 0);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
 export function CommandPalette({ onClose }: { onClose: () => void }) {
   const store = useStore();
   const { state, dispatch } = store;
   const [query, setQuery] = useState('');
+  const [card, setCard] = useState('');
+  const [botId, setBotId] = useState('');
+  const [roomId, setRoomId] = useState('');
+  const [fromDay, setFromDay] = useState('');
+  const [toDay, setToDay] = useState('');
   const [hits, setHits] = useState<{ threadId: string; message: { id: string; text?: string } }[]>([]);
 
   useEffect(() => {
@@ -823,11 +836,19 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       setHits([]);
       return;
     }
+    const params = new URLSearchParams({ q: query });
+    if (card) params.set('card', card);
+    if (botId) params.set('bot', botId);
+    if (roomId) params.set('room', roomId);
+    const from = dayBound(fromDay, false);
+    const to = dayBound(toDay, true);
+    if (from != null) params.set('from', String(from));
+    if (to != null) params.set('to', String(to));
     const timer = setTimeout(() => {
-      void api.get<{ messages: typeof hits }>(`/api/search?q=${encodeURIComponent(query)}`).then((r) => setHits(r.messages.slice(0, 20)));
+      void api.get<{ messages: typeof hits }>(`/api/search?${params}`).then((r) => setHits(r.messages.slice(0, 20)));
     }, 150);
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, card, botId, roomId, fromDay, toDay]);
 
   const lower = query.toLowerCase();
   const bots = state.bots.filter((b) => !b.hidden && b.name.toLowerCase().includes(lower)).slice(0, 8);
@@ -845,6 +866,28 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           className="w-full px-4 py-3 text-[14px] outline-none"
           style={{ background: 'transparent', color: 'var(--color-ink)' }}
         />
+        <div className="flex gap-2 border-t px-3 py-2 hairline">
+          <select value={botId} onChange={(e) => setBotId(e.target.value)} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }} aria-label="Limit search to a bot">
+            <option value="">Any bot</option>
+            {state.bots.filter((b) => !b.hidden).map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+          <select value={roomId} onChange={(e) => setRoomId(e.target.value)} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }} aria-label="Limit search to a room">
+            <option value="">Any room</option>
+            {state.groups.filter((g) => !g.dm).map((g) => (
+              <option key={g.id} value={g.id}>{g.name}</option>
+            ))}
+          </select>
+          <select value={card} onChange={(e) => setCard(e.target.value)} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }} aria-label="Limit search to a card type">
+            <option value="">Any message</option>
+            <option value="approval">Approvals</option>
+            <option value="tool">Tools</option>
+            <option value="goal">Goals</option>
+          </select>
+          <input type="date" value={fromDay} onChange={(e) => setFromDay(e.target.value)} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }} aria-label="From date" />
+          <input type="date" value={toDay} onChange={(e) => setToDay(e.target.value)} className="rounded-lg px-2 py-1 text-[12px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink)' }} aria-label="To date" />
+        </div>
         <div className="max-h-[50vh] overflow-y-auto border-t hairline">
           {bots.map((bot) => (
             <button
@@ -856,7 +899,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
               }}
               className="flex w-full items-center gap-2 px-4 py-2 text-left text-[13px]"
             >
-              <Avatar name={bot.name} color={bot.color} size={22} />
+              <Avatar name={bot.name} color={bot.color} avatarShape={bot.avatarShape} size={22} />
               {bot.name}
             </button>
           ))}
@@ -1054,7 +1097,7 @@ export function NotificationCentre() {
                   <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: NOTIFICATION_TONE[notification.kind] }} />
                   {notification.botName}
                   <span className="font-normal" style={{ color: 'var(--color-ink-secondary)' }}>
-                    {notification.kind.replace('-', ' ')}
+                    {notification.taskTitle ? `· ${notification.taskTitle}` : notification.kind.replace('-', ' ')}
                   </span>
                   <span className="flex-1" />
                   <span className="font-normal text-[11px]" style={{ color: 'var(--color-ink-secondary)' }}>
@@ -1085,7 +1128,7 @@ export function CallView({ botId, onClose }: { botId: string; onClose: () => voi
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 p-8" style={{ background: 'var(--color-app)' }}>
-      <Avatar name={bot.name} color={bot.color} activity={bot.activity} size={96} />
+      <Avatar name={bot.name} color={bot.color} activity={bot.activity} avatarShape={bot.avatarShape} size={96} />
       <div className="text-[18px] font-semibold">{bot.name}</div>
       <div className="text-[13px]" style={{ color: 'var(--color-ink-secondary)' }} aria-live="polite">
         {speaking ? 'Speaking — your mic is muted' : bot.activity === 'working' ? 'Working' : 'Listening'}

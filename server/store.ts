@@ -9,7 +9,7 @@ import type {
   TaskUsage,
   ThreadId,
 } from '../shared/types.ts';
-import { BOT_COLORS } from '../shared/types.ts';
+import { BOT_COLORS, isAvatarShape } from '../shared/types.ts';
 import { dataPath, newId, readJsonSafe, writeJsonAtomic } from './paths.ts';
 import { redactDeep, redactSecretsInText } from './redact.ts';
 import * as db from './message-db.ts';
@@ -94,6 +94,7 @@ class Store extends EventEmitter {
       color: input.color ?? pickColor(this.bots),
       mascotExpression: input.mascotExpression ?? null,
       avatarUrl: input.avatarUrl,
+      avatarShape: isAvatarShape(input.avatarShape) ? input.avatarShape : undefined,
       avatarCrop: input.avatarCrop,
       unread: false,
       modelSelection: input.modelSelection,
@@ -122,6 +123,8 @@ class Store extends EventEmitter {
         'lean',
         'cloudBackend',
         'autoStartVps',
+        'spendCapUsd',
+        'spendConfirmedUsd',
       ]),
     };
     if (input.chiefOfStaff) {

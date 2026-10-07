@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { currentModelLabel, filterModels, flattenModels, groupModels, modelProvider, type CatalogEngine } from './model-catalog.ts';
+import { chromeModelName, currentModelLabel, filterModels, flattenModels, groupModels, modelProvider, visibleModelName, type CatalogEngine } from './model-catalog.ts';
 
 const engines = (): CatalogEngine[] => [
   {
@@ -33,6 +33,27 @@ describe('modelProvider', () => {
   it('splits a Hermes provider:model id and leaves a plain id alone', () => {
     expect(modelProvider('openrouter:anthropic/claude')).toBe('openrouter');
     expect(modelProvider('grok-4.6')).toBeUndefined();
+  });
+});
+
+describe('visibleModelName', () => {
+  it('shows the model id when the catalogue label buries it after the provider', () => {
+    expect(
+      visibleModelName('openai-codex:gpt-5.4', 'openai-codex · ChatGPT or Codex Subscription · gpt-5.4'),
+    ).toBe('gpt-5.4');
+    expect(visibleModelName('openai-codex:gpt-5.4-mini', 'ChatGPT or Codex Subscription · gpt-5.4-mini')).toBe(
+      'gpt-5.4-mini',
+    );
+  });
+
+  it('keeps a short human name and a label that is already the model', () => {
+    expect(visibleModelName('opencode-free:nemotron', 'Nemotron')).toBe('Nemotron');
+    expect(visibleModelName('opencode-free:nemotron', 'opencode-free · Nemotron')).toBe('Nemotron');
+    expect(visibleModelName('grok-4', 'Grok 4')).toBe('Grok 4');
+  });
+
+  it('recovers a model id that was already clipped in the stored label', () => {
+    expect(visibleModelName('openai-codex:gpt-5.4', 'ChatGPT or Codex Subscription · gpt-...')).toBe('gpt-5.4');
   });
 });
 
@@ -82,5 +103,22 @@ describe('currentModelLabel', () => {
       engine: 'missing',
       model: 'x',
     });
+  });
+
+  it('shows the provider and the model id in the chrome', () => {
+    const listed = engines();
+    listed[0]?.models.push({
+      id: 'openai-codex:gpt-5.4',
+      label: 'openai-codex · ChatGPT or Codex Subscription · gpt-5.4',
+    });
+    expect(chromeModelName('openai-codex:gpt-5.4', 'openai-codex · ChatGPT or Codex Subscription · gpt-5.4')).toBe(
+      'openai-codex · gpt-5.4',
+    );
+    expect(currentModelLabel({ instanceId: 'hermes', model: 'openai-codex:gpt-5.4' }, listed).model).toBe(
+      'openai-codex · gpt-5.4',
+    );
+    expect(currentModelLabel({ instanceId: 'missing', model: 'openrouter:anthropic/claude-haiku-4.5' }, listed).model).toBe(
+      'openrouter · anthropic/claude-haiku-4.5',
+    );
   });
 });

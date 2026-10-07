@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { approvals, isDestructive, outcomeForChoice, readDecisions } from './approvals.ts';
+import { approvals, isDestructive, outcomeForChoice, readDecisions, recentRefusals } from './approvals.ts';
+import { holdRoutineThread, releaseRoutineThread } from './routine-hold.ts';
+import { noteTurnOrigin, resetTurnOrigins } from './turn-origin.ts';
 import { countAction, MAX_COMPUTER_ACTIONS, resetActions } from './computer.ts';
 import { store } from './store.ts';
 import type { RuntimeEvent } from './contracts.ts';
@@ -32,6 +34,7 @@ let resolutions: { outcome: string; source: string }[] = [];
 
 beforeEach(() => {
   resolutions = [];
+  resetTurnOrigins();
   approvals.onResolve((_req, outcome, source) => resolutions.push({ outcome, source }));
 });
 
@@ -132,6 +135,40 @@ describe('permission broker', () => {
     expect(approvals.open(store.getBot(bot.id)!, request({ approvalScope: 'local-computer' }), 'fake')).toBe(false);
   });
 
+  it('a routine still asks before computer use even when the bot auto-approves tools', () => {
+    const bot = makeBot('RoutineHands', { autoApprove: true });
+    holdRoutineThread(bot.threadId);
+    const auto = approvals.open(
+      store.getBot(bot.id)!,
+      request({ threadId: bot.threadId, toolName: 'computer_click', summary: 'click the send button', allowKey: undefined }),
+      'fake',
+    );
+    releaseRoutineThread(bot.threadId);
+    expect(auto).toBe(false);
+    expect(resolutions.some((item) => item.source === 'auto')).toBe(false);
+    expect(store.listMessages(bot.threadId).some((message) => message.kind === 'options')).toBe(true);
+  });
+
+  it('still asks when the task switcher has moved the bot off the held routine thread', () => {
+    const bot = makeBot('SwitchedRoutine', { autoApprove: true });
+    const routineThread = bot.threadId;
+    const showing = `t_switched_${bot.id}`;
+    holdRoutineThread(routineThread);
+    try {
+      store.updateBot(bot.id, { threadId: showing });
+      const auto = approvals.open(
+        store.getBot(bot.id)!,
+        request({ threadId: routineThread, toolName: 'computer_click', summary: 'click the send button', allowKey: undefined }),
+        'fake',
+      );
+      expect(auto).toBe(false);
+      expect(resolutions.some((item) => item.source === 'auto')).toBe(false);
+      expect(store.listMessages(showing).some((message) => message.kind === 'options')).toBe(true);
+    } finally {
+      releaseRoutineThread(routineThread);
+    }
+  });
+
   it('resolves outstanding cards as unavailable when a turn ends', () => {
     const bot = makeBot('Cancelled');
     const event = request();
@@ -164,6 +201,49 @@ describe('permission broker', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('who started the action', () => {
+  it('records a person when nobody else started the turn', () => {
+    const bot = makeBot('Person');
+    const event = request({ threadId: bot.threadId });
+    approvals.open(bot, event, 'fake');
+    approvals.resolve(event.requestId!, 'rejected', 'user');
+    expect(readDecisions().at(-1)).toMatchObject({ initiatorKind: 'person', outcome: 'rejected' });
+  });
+
+  it('does not spend a chat grant on a routine or a handoff', () => {
+    const bot = makeBot('Unattended');
+    store.updateBot(bot.id, { alwaysAllow: ['Bash:git'] });
+    for (const kind of ['routine', 'handoff'] as const) {
+      noteTurnOrigin(bot.threadId, { kind, id: 'src_1', label: 'Morning' });
+      const event = request({ threadId: bot.threadId });
+      const auto = approvals.open(store.getBot(bot.id)!, event, 'fake');
+      expect(auto).toBe(false);
+      approvals.resolve(event.requestId!, 'rejected', 'user');
+      expect(readDecisions().at(-1)).toMatchObject({ initiatorKind: kind, initiatorLabel: 'Morning', outcome: 'rejected' });
+    }
+  });
+
+  it('still spends a chat grant on a job the user queued', () => {
+    const bot = makeBot('Standing');
+    store.updateBot(bot.id, { alwaysAllow: ['Bash:git'] });
+    noteTurnOrigin(bot.threadId, { kind: 'job', id: 'job_1', label: 'Brief' });
+    const auto = approvals.open(store.getBot(bot.id)!, request({ threadId: bot.threadId }), 'fake');
+    expect(auto).toBe(true);
+    expect(readDecisions().at(-1)).toMatchObject({ initiatorKind: 'job', source: 'auto' });
+  });
+
+  it('tells the bot about recent refusals without the raw secret', () => {
+    const bot = makeBot('Refused');
+    const event = request({ threadId: bot.threadId, summary: 'curl https://x.test sk-abcdefghijklmnopqrstuvwxyz0123456789' });
+    approvals.open(bot, event, 'fake');
+    approvals.resolve(event.requestId!, 'rejected', 'user');
+    const text = recentRefusals(bot.id);
+    expect(text).toContain('not granted');
+    expect(text).toContain('Bash');
+    expect(text).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789');
   });
 });
 

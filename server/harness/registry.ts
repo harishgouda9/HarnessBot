@@ -48,13 +48,19 @@ export class Registry {
   }
 
   watchConfig(): () => void {
-    return onConfigChange(() => void this.reload());
+    return onConfigChange(() => {
+      void this.reload().catch(() => {});
+    });
   }
 
   async reload(): Promise<void> {
     // Serialise reloads: two config saves in a row must not race two adapter sets.
-    this.reloading = (this.reloading ?? Promise.resolve()).then(() => this.doReload());
-    return this.reloading;
+    // A rejection is returned to this caller, and then dropped from the chain so the
+    // next reload still runs. Leaving the rejected promise in place poisons every later one.
+    const previous = (this.reloading ?? Promise.resolve()).catch(() => {});
+    const run = previous.then(() => this.doReload());
+    this.reloading = run.catch(() => {});
+    return run;
   }
 
   private async doReload(): Promise<void> {

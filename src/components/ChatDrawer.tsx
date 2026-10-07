@@ -86,7 +86,7 @@ export function ChatDrawer() {
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-l hairline"
+      className="relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-l hairline"
       style={{ width, background: 'var(--color-app)' }}
       aria-label={`Chat with ${bot.name}`}
     >

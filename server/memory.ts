@@ -111,6 +111,30 @@ export function addMemory(input: MemoryInput): MemoryEntry {
   return entry;
 }
 
+function readJsonlDir(dir: string): MemoryEntry[] {
+  const entries: MemoryEntry[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return entries;
+  }
+  for (const name of names) {
+    const full = path.join(dir, name);
+    try {
+      if (fs.statSync(full).isDirectory()) entries.push(...readAll(path.join(full, 'memory.jsonl')));
+    } catch {
+      /* a torn directory is not a memory */
+    }
+  }
+  return entries;
+}
+
+/** Every durable memory entry: workspace, each bot, each section. */
+export function listAllMemory(): MemoryEntry[] {
+  return [...readAll(dataPath('memory', 'workspace.jsonl')), ...readJsonlDir(dataPath('bots')), ...readJsonlDir(dataPath('sections'))];
+}
+
 export function listMemory(scope: MemoryScope, id: string, query?: string): MemoryEntry[] {
   const all = readAll(fileFor(scope, id));
   if (!query) return all;

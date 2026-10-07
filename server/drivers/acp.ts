@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
@@ -19,7 +20,7 @@ import type {
   TurnIntegrations,
 } from '../contracts.ts';
 import { NO_CAPABILITIES } from '../contracts.ts';
-import { appendNdjson, dataPath } from '../paths.ts';
+import { appendNdjsonLimited, dataPath, threadLogPath } from '../paths.ts';
 import { findCli, killTree, lineReader, spawnCli } from './spawn.ts';
 import { allowKeyFor } from './cli.ts';
 import { isComputerTool } from '../computer.ts';
@@ -68,6 +69,36 @@ const PROTOCOL_VERSION = 1;
 /** A boot that never finishes must not wedge a turn forever. */
 const START_TIMEOUT_MS = 120_000;
 
+/** A client write bigger than this is refused. Pipeline files are far smaller. */
+const MAX_FILE_CHARS = 1_000_000;
+
+/** True when `file` is `root` or a path inside it. A sibling prefix does not count. */
+export function containedPath(root: string, file: string): boolean {
+  const base = path.resolve(root);
+  const target = path.resolve(file);
+  return target === base || target.startsWith(base + path.sep);
+}
+
+/**
+ * Absolute path the agent may read or write: this session's folder, or the shared
+ * workspace every bot already uses for handoffs. Anywhere else is refused.
+ */
+export function allowedFilePath(roots: string[], file: string): string | null {
+  if (typeof file !== 'string' || !path.isAbsolute(file)) return null;
+  const target = path.resolve(file);
+  for (const root of roots) {
+    if (root && containedPath(root, target)) return target;
+  }
+  return null;
+}
+
+export function relativeToRoots(roots: string[], file: string): string {
+  for (const root of roots) {
+    if (root && containedPath(root, file)) return path.relative(root, file);
+  }
+  return path.basename(file);
+}
+
 interface Pending {
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
@@ -93,6 +124,30 @@ function str(v: unknown): string | undefined {
 }
 
 /**
+ * Label for one ACP model row.
+ *
+ * Hermes inventory names are already `Provider label · model-id`. Prefixing the
+ * slug again (`openai-codex · ChatGPT or Codex Subscription · gpt-5.4`) pushes
+ * the only unique part past the end of a truncated row. A short advertised name
+ * such as `Nemotron` is kept; the provider is a group header, not part of the name.
+ */
+export function acpModelLabel(id: string, name: string): string {
+  const cut = id.indexOf(':');
+  const modelPart = cut > 0 ? id.slice(cut + 1) : id;
+  const provider = cut > 0 ? id.slice(0, cut) : '';
+  const advertised = name.trim() || id;
+  if (!provider) return advertised;
+  const sep = advertised.lastIndexOf(' · ');
+  if (sep >= 0) {
+    const tail = advertised.slice(sep + 3).trim();
+    if (tail && tail.toLowerCase() === modelPart.toLowerCase()) return tail;
+    if (tail && tail.length <= 64) return tail;
+    return modelPart;
+  }
+  return advertised;
+}
+
+/**
  * Models advertised by `session/new`. Hermes ids are `provider:model`, and the
  * picker has to keep that id — it is what `session/set_model` expects.
  */
@@ -109,9 +164,7 @@ export function readAcpModels(result: Record<string, unknown>): ModelInfo[] {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const name = str(rec.name) ?? id;
-    const provider = id.includes(':') ? id.slice(0, id.indexOf(':')) : '';
-    const label = provider && !name.toLowerCase().startsWith(provider.toLowerCase()) ? `${provider} · ${name}` : name;
-    out.push({ id, label, default: current ? id === current : undefined });
+    out.push({ id, label: acpModelLabel(id, name), default: current ? id === current : undefined });
   }
   return out;
 }
@@ -214,6 +267,15 @@ class AcpAdapter implements ProviderAdapter {
   private cachedSnapshot?: { at: number; value: InstanceSnapshot };
   /** Models the agent reported. Survives restart so the picker is not one row until the next probe. */
   private learned: ModelInfo[] = [];
+  /**
+   * Model id last confirmed on that ACP session.
+   * The catalogue `default` flag is not this: a refresh or another bot's switch
+   * rewrites it, and the next turn would skip `session/set_model` while this
+   * session was still on the model it opened with.
+   */
+  private sessionModel = new Map<string, string>();
+  /** Folder the session was opened in. File methods may also use the shared workspace. */
+  private sessionCwd = new Map<string, string>();
   private probing: Promise<ModelInfo[]> | null = null;
 
   private readonly spec: AcpDriverSpec;
@@ -308,20 +370,27 @@ class AcpAdapter implements ProviderAdapter {
     }
   }
 
-  /** Switch only when the agent advertised the id. `default` means "leave Hermes on its config". */
+  /** Switch this session when its confirmed model is not the one the turn asked for. `default` leaves Hermes on its config. */
   private async applyModel(threadId: ThreadId, sessionId: string, model: string): Promise<void> {
     if (!model || model === 'default') return;
-    const current = this.learned.find((m) => m.default)?.id;
-    if (current === model) return;
+    if (this.sessionModel.get(sessionId) === model) return;
+    // Hermes accepts a provider:model id it has not advertised yet (a stale catalogue,
+    // or a model the user added). Other agents only switch to an id they listed.
     if (this.spec.kind !== 'hermes' && !this.learned.some((m) => m.id === model)) return;
     try {
       await this.request('session/set_model', { sessionId, modelId: model });
-      this.remember(this.learned.map((m) => ({ ...m, default: m.id === model })));
+      this.sessionModel.set(sessionId, model);
+      if (this.learned.some((m) => m.id === model)) {
+        this.remember(this.learned.map((m) => ({ ...m, default: m.id === model })));
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const stayed = this.sessionModel.get(sessionId);
       this.emit(threadId, {
         type: 'runtime.error',
-        message: `Could not switch to ${model} (${message}). This turn stays on the model's current provider.`,
+        message: stayed
+          ? `Could not switch to ${model} (${message}). This turn stays on ${stayed}.`
+          : `Could not switch to ${model} (${message}). This turn stays on the model the session opened with.`,
       });
     }
   }
@@ -407,7 +476,7 @@ class AcpAdapter implements ProviderAdapter {
 
       const initialize = this.request('initialize', {
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
       });
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`${this.spec.displayName} did not answer initialize`)), START_TIMEOUT_MS),
@@ -430,6 +499,8 @@ class AcpAdapter implements ProviderAdapter {
     this.sessions.clear();
     this.mounted.clear();
     this.threadOf.clear();
+    this.sessionModel.clear();
+    this.sessionCwd.clear();
     this.permissions.clear();
     this.child = null;
     this.starting = null;
@@ -466,9 +537,70 @@ class AcpAdapter implements ProviderAdapter {
     if (method) this.onNotification(method, asRecord(msg.params), msg);
   }
 
+  private rootsFor(sessionId: string): string[] {
+    const roots = [dataPath('workspace')];
+    const cwd = this.sessionCwd.get(sessionId);
+    // Home is the fallback desk, not a project. A write there would skip the approval card.
+    if (cwd && path.resolve(cwd) !== path.resolve(os.homedir())) roots.push(cwd);
+    return roots;
+  }
+
+  /** Read or write a text file the agent asked the client to touch. Content never goes into the transcript. */
+  private onClientFile(id: number, method: string, params: Record<string, unknown>): void {
+    const sessionId = str(params.sessionId) ?? '';
+    const threadId = this.threadOf.get(sessionId);
+    const roots = this.rootsFor(sessionId);
+    const file = allowedFilePath(roots, str(params.path) ?? '');
+    if (!threadId || !file) {
+      const workspace = dataPath('workspace');
+      this.respondError(
+        id,
+        -32000,
+        `that path is outside the shared workspace (${workspace}) and this bot's project folder. Use an absolute path inside ${workspace}.`,
+      );
+      return;
+    }
+    const shown = relativeToRoots(roots, file);
+    try {
+      if (method === 'fs/read_text_file') {
+        const raw = fs.readFileSync(file, 'utf8').slice(0, MAX_FILE_CHARS);
+        const lines = raw.split('\n');
+        const start = Math.max(0, Number(params.line ?? 1) - 1);
+        const count = params.limit === undefined ? lines.length : Math.max(0, Number(params.limit));
+        this.emit(threadId, { type: 'item.completed', itemKind: 'tool', toolName: 'Read', title: shown, ok: true });
+        this.respond(id, { content: lines.slice(start, start + count).join('\n') });
+        return;
+      }
+      const content = typeof params.content === 'string' ? params.content : '';
+      if (content.length > MAX_FILE_CHARS) {
+        this.respondError(id, -32000, 'that file is too large to write');
+        return;
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, 'utf8');
+      const bytes = Buffer.byteLength(content);
+      this.emit(threadId, {
+        type: 'item.completed',
+        itemKind: 'tool',
+        toolName: 'Write',
+        title: `${shown} (${bytes} bytes)`,
+        ok: true,
+      });
+      this.respond(id, {});
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'could not touch that file';
+      this.emit(threadId, { type: 'item.completed', itemKind: 'tool', toolName: 'Write', title: shown, ok: false });
+      this.respondError(id, -32000, message);
+    }
+  }
+
   private onAgentRequest(id: number, method: string, params: Record<string, unknown>): void {
+    if (method === 'fs/read_text_file' || method === 'fs/write_text_file') {
+      this.onClientFile(id, method, params);
+      return;
+    }
+
     if (method !== 'session/request_permission') {
-      // We declared no filesystem and no terminal, so anything else is out of contract.
       this.respondError(id, -32601, `${method} is not supported by this client`);
       return;
     }
@@ -524,12 +656,15 @@ class AcpAdapter implements ProviderAdapter {
 
     const update = asRecord(params.update);
     const kind = str(update.sessionUpdate);
-    appendNdjson(dataPath('native', `${threadId}.ndjson`), {
-      at: Date.now(),
-      dir: 'in',
-      source: this.spec.kind,
-      msg: raw,
-    });
+    const nativeLog = threadLogPath('native', threadId);
+    if (nativeLog) {
+      appendNdjsonLimited(nativeLog, {
+        at: Date.now(),
+        dir: 'in',
+        source: this.spec.kind,
+        msg: raw,
+      });
+    }
 
     switch (kind) {
       case 'agent_message_chunk': {
@@ -591,6 +726,8 @@ class AcpAdapter implements ProviderAdapter {
     if (existing) {
       this.threadOf.delete(existing);
       this.sessions.delete(input.threadId);
+      this.sessionModel.delete(existing);
+      this.sessionCwd.delete(existing);
     }
 
     const result = await this.request('session/new', {
@@ -601,10 +738,13 @@ class AcpAdapter implements ProviderAdapter {
     if (!sessionId) throw new Error('the agent created no session');
     const advertised = readAcpModels(result);
     if (advertised.length) this.remember(advertised);
+    const booted = advertised.find((m) => m.default)?.id;
+    if (booted) this.sessionModel.set(sessionId, booted);
 
     this.sessions.set(input.threadId, sessionId);
     this.mounted.set(input.threadId, signature);
     this.threadOf.set(sessionId, input.threadId);
+    if (input.cwd) this.sessionCwd.set(sessionId, input.cwd);
     // Deliberately no resumeCursor. The harness stops replaying the branch once one is
     // stored (turns.ts), but this map is in memory — so after a harness restart we would
     // open a blank session and be handed no history to put in it. Reporting no cursor
@@ -740,7 +880,11 @@ class AcpAdapter implements ProviderAdapter {
 
   async dropSession(threadId: ThreadId): Promise<void> {
     const sessionId = this.sessions.get(threadId);
-    if (sessionId) this.threadOf.delete(sessionId);
+    if (sessionId) {
+      this.threadOf.delete(sessionId);
+      this.sessionModel.delete(sessionId);
+      this.sessionCwd.delete(sessionId);
+    }
     this.sessions.delete(threadId);
     this.mounted.delete(threadId);
     const turn = this.turns.get(threadId);
@@ -758,6 +902,8 @@ class AcpAdapter implements ProviderAdapter {
     this.sessions.clear();
     this.mounted.clear();
     this.threadOf.clear();
+    this.sessionModel.clear();
+    this.sessionCwd.clear();
     this.permissions.clear();
   }
 }

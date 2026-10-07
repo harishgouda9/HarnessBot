@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BotRecord } from '../../shared/types.ts';
 import { api } from '../api.ts';
 import { t } from '../i18n.ts';
-import { currentModelLabel, filterModels, flattenModels, groupModels, modelProvider, type CatalogRow } from '../model-catalog.ts';
+import { currentModelLabel, filterModels, flattenModels, groupModels, modelProvider, visibleModelName, type CatalogRow } from '../model-catalog.ts';
 import { useStore } from '../store.tsx';
 import { Icon } from './Icons.tsx';
 import { AddProviderDialog } from './Overlays.tsx';
@@ -37,6 +37,7 @@ export function ChatModelPicker({ bot }: { bot: BotRecord }) {
   const [draft, setDraft] = useState({ instanceId: bot.modelSelection.instanceId, id: '', label: '' });
   const [busy, setBusy] = useState(false);
   const [probing, setProbing] = useState(false);
+  const [probeError, setProbeError] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -50,23 +51,35 @@ export function ChatModelPicker({ bot }: { bot: BotRecord }) {
   const active = instances.find((i) => i.instanceId === selection.instanceId);
   const live = instances.find((i) => i.state === 'available');
 
+  const refreshCatalog = async (force: boolean): Promise<void> => {
+    const hermes = instances.filter((instance) => instance.driver === 'hermes' && instance.state === 'available');
+    const pending = force ? hermes : hermes.filter((instance) => !instance.models.some((model) => model.id.includes(':')));
+    if (!pending.length) {
+      if (force) setProbeError(hermes.length ? '' : 'Hermes is not connected, so the model list cannot be reloaded.');
+      return;
+    }
+    setProbing(true);
+    setProbeError('');
+    try {
+      const results = await Promise.all(
+        pending.map((instance) =>
+          api.post(`/api/instances/${instance.instanceId}/models`, {}).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      );
+      await refreshInstances();
+      if (results.some((ok) => !ok)) setProbeError('Could not reload the model list. Try again.');
+    } finally {
+      setProbing(false);
+    }
+  };
+
   useEffect(() => {
     if (!open) return;
-    const pending = instances.filter(
-      (instance) => instance.driver === 'hermes' && instance.state === 'available' && !instance.models.some((model) => model.id.includes(':')),
-    );
-    if (!pending.length) return;
-    let gone = false;
-    setProbing(true);
-    void Promise.all(pending.map((instance) => api.post(`/api/instances/${instance.instanceId}/models`, {}).catch(() => undefined)))
-      .then(() => refreshInstances())
-      .finally(() => {
-        if (!gone) setProbing(false);
-      });
-    return () => {
-      gone = true;
-    };
-    // Probe once per open. `instances` is read at open time; a later refresh fills the list.
+    void refreshCatalog(false);
+    // Probe once per open. `instances` is read at open time; Refresh reloads even when ids already have a provider.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -128,7 +141,7 @@ export function ChatModelPicker({ bot }: { bot: BotRecord }) {
         aria-label={t('composer.changeModel')}
         aria-expanded={open}
         aria-haspopup="listbox"
-        className="flex max-w-[11rem] items-center gap-1 rounded-xl px-2 py-1.5 text-left text-[12px]"
+        className="flex max-w-[18rem] items-center gap-1 rounded-xl px-2 py-1.5 text-left text-[12px]"
         style={{ background: 'var(--color-inset)', color: 'var(--color-ink)', border: '1px solid var(--color-hairline)' }}
       >
         <span className="min-w-0 flex-1 truncate">{current.model || current.engine || 'Model'}</span>
@@ -144,22 +157,37 @@ export function ChatModelPicker({ bot }: { bot: BotRecord }) {
         <>
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
           <div
-            className="card absolute bottom-11 right-0 z-30 flex w-[min(22rem,calc(100vw-2rem))] flex-col py-2"
+            className="card absolute bottom-11 right-0 z-30 flex w-[min(28rem,calc(100vw-2rem))] flex-col py-2"
             style={{ background: 'var(--color-panel)', maxHeight: 'min(24rem, 70vh)' }}
             role="listbox"
             aria-label={t('composer.changeModel')}
           >
-            <div className="px-2 pb-2">
+            <div className="flex items-center gap-1 px-2 pb-2">
               <input
                 ref={searchRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t('composer.searchModels')}
                 aria-label={t('composer.searchModels')}
-                className="w-full rounded-lg px-2 py-1.5 text-[13px]"
+                className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-[13px]"
                 style={{ background: 'var(--color-inset)', color: 'var(--color-ink)', border: '1px solid var(--color-hairline)' }}
               />
+              <button
+                type="button"
+                disabled={probing}
+                onClick={() => void refreshCatalog(true)}
+                className="shrink-0 rounded-lg px-2 py-1.5 text-[12px] disabled:opacity-50"
+                style={{ background: 'var(--color-raised)', color: 'var(--color-ink)', border: '1px solid var(--color-hairline)' }}
+                title="Reload the model list from Hermes"
+              >
+                {probing ? 'Refreshing…' : 'Refresh'}
+              </button>
             </div>
+            {probeError ? (
+              <div className="px-3 pb-2 text-[11px]" style={{ color: 'var(--color-warning, var(--color-ink-secondary))' }}>
+                {probeError}
+              </div>
+            ) : null}
 
             <button
               type="button"
@@ -216,12 +244,13 @@ export function ChatModelPicker({ bot }: { bot: BotRecord }) {
                           type="button"
                           disabled={!row.available}
                           onClick={() => pick(row.instanceId, row.modelId)}
-                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] disabled:opacity-45"
+                          className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] disabled:opacity-45"
                           style={{ background: selected ? 'var(--color-raised)' : 'transparent' }}
                           role="option"
                           aria-selected={selected}
+                          title={row.modelId}
                         >
-                          <span className="min-w-0 flex-1 truncate">{row.modelLabel}</span>
+                          <span className="min-w-0 flex-1 whitespace-normal break-words">{visibleModelName(row.modelId, row.modelLabel)}</span>
                           {row.extra ? (
                             <span className="shrink-0 text-[10px]" style={{ color: 'var(--color-ink-secondary)' }}>
                               added

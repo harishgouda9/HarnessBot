@@ -71,22 +71,23 @@ function BotTile({
   const [menu, setMenu] = useState(false);
   const avatarsOnly = density === 'avatars';
   const size = avatarsOnly ? 28 : 26;
+  const presence =
+    bot.activity === 'working' ? t('app.working') : bot.activity === 'waiting-on-you' ? t('app.needsYou') : '';
 
   return (
     <div className="relative">
       <button
         type="button"
         onClick={onSelect}
-        title={avatarsOnly ? `${bot.name}${bot.title ? ` — ${bot.title}` : ''}` : undefined}
+        title={avatarsOnly ? [bot.name, presence, bot.title].filter(Boolean).join(' — ') : undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           setMenu(true);
         }}
-        className={`flex w-full items-center gap-2 rounded-xl text-left ${avatarsOnly ? 'justify-center px-0.5 py-1' : 'px-2 py-1'}`}
-        style={{ background: selected ? 'var(--color-raised)' : 'transparent' }}
+        className={`flex w-full items-center gap-2 rounded-xl text-left ${avatarsOnly ? 'justify-center px-0.5 py-1' : 'px-2 py-1'} ${selected ? 'is-selected' : ''}`}
       >
         <span className="relative shrink-0">
-          <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} size={size} />
+          <Avatar name={bot.name} color={bot.color} activity={bot.activity} expression={bot.mascotExpression} avatarUrl={bot.avatarUrl} avatarShape={bot.avatarShape} size={size} />
           {avatarsOnly && bot.unread ? (
             <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full" style={{ background: 'var(--color-accent)', border: '2px solid var(--color-panel)' }} />
           ) : null}
@@ -98,12 +99,20 @@ function BotTile({
               <span className="flex items-center gap-1.5">
                 <span className="truncate text-[13px] font-medium">{bot.name}</span>
                 {bot.chiefOfStaff ? (
-                  <span className="shrink-0 rounded px-1 text-[10px]" style={{ background: 'var(--color-inset)', color: 'var(--color-ink-secondary)' }}>
+                  <span className="shrink-0 rounded px-1 text-[10px]" style={{ background: 'var(--color-raised)', color: 'var(--color-ink-secondary)' }}>
                     chief
                   </span>
                 ) : null}
                 <ActivityDot activity={bot.activity} />
               </span>
+              {presence ? (
+                <span
+                  className="block truncate text-[11px] leading-tight"
+                  style={{ color: bot.activity === 'working' ? 'var(--color-success)' : 'var(--color-warning)' }}
+                >
+                  {presence}
+                </span>
+              ) : null}
             </span>
             {bot.unread ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--color-accent)' }} aria-label="unread" /> : null}
           </>
@@ -139,8 +148,7 @@ function RoomRow({
       type="button"
       onClick={onSelect}
       title={avatarsOnly ? `${group.name} · ${memberCount}` : undefined}
-      className={`flex w-full items-center gap-2 rounded-xl text-left ${avatarsOnly ? 'justify-center px-0.5 py-1' : 'px-2 py-1.5'}`}
-      style={{ background: selected ? 'var(--color-raised)' : 'transparent' }}
+      className={`flex w-full items-center gap-2 rounded-xl text-left ${avatarsOnly ? 'justify-center px-0.5 py-1' : 'px-2 py-1.5'} ${selected ? 'is-selected' : ''}`}
     >
       <span
         className="grid shrink-0 place-items-center rounded-xl text-[13px]"
@@ -153,7 +161,7 @@ function RoomRow({
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[13px] font-medium">{group.name}</span>
           </span>
-          {group.unread ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--color-accent)' }} /> : null}
+          {group.unread ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--color-accent)' }} aria-label="unread" /> : null}
         </>
       )}
     </button>
@@ -183,7 +191,7 @@ export function Sidebar({
 }: {
   onNewBot: () => void;
   onOpenSettings: () => void;
-  onOpenView: (view: 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder') => void;
+  onOpenView: (view: 'calendar' | 'skills' | 'team' | 'plugins' | 'recorder' | 'history' | 'workflows') => void;
 }) {
   const store = useStore();
   const { state, dispatch } = store;
@@ -265,6 +273,8 @@ export function Sidebar({
     { label: 'Skills', icon: 'book', view: 'skills' },
     { label: 'Teach a skill', icon: 'record', view: 'recorder' },
     { label: 'Calendar', icon: 'calendar', view: 'calendar' },
+    { label: 'Chat history', icon: 'history', view: 'history' },
+    { label: 'Workflows', icon: 'flow', view: 'workflows' },
     { label: 'Connected apps', icon: 'apps', view: 'plugins' },
   ];
 
@@ -436,7 +446,7 @@ export function Sidebar({
         </button>
 
         {workspaceOpen ? (
-          <div className={avatarsOnly ? 'flex flex-col items-center gap-1' : 'grid grid-cols-2 gap-1'}>
+          <div className={avatarsOnly ? 'flex flex-col items-center gap-1' : 'flex flex-col gap-0.5'}>
             {workspaceItems.map((item) => {
               const active = state.view === item.view;
               return (
@@ -449,7 +459,7 @@ export function Sidebar({
                   aria-current={active ? 'page' : undefined}
                   className={`flex items-center rounded-lg text-[12px] ${avatarsOnly ? 'h-8 w-8 justify-center' : 'gap-1.5 px-2 py-1.5 text-left'}`}
                   style={{
-                    background: active ? 'var(--color-raised)' : 'var(--color-inset)',
+                    background: active ? 'var(--color-inset)' : 'transparent',
                     color: active ? 'var(--color-ink)' : 'var(--color-ink-secondary)',
                     boxShadow: active ? 'inset 2px 0 0 var(--color-accent)' : undefined,
                   }}

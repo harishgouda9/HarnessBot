@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { grokBuildArgs, grokHandsArgs, grokModelId } from './builtIn.ts';
+import { toolTraceTitle } from './cli.ts';
 import { defineCliDriver } from './cli.ts';
 import { EventBus, recordEvents } from '../harness/bus.ts';
 import type { DriverContext, RuntimeEvent, SendTurnInput } from '../contracts.ts';
@@ -38,8 +39,24 @@ describe('grokBuildArgs', () => {
     expect(args).not.toContain('--prompt-json');
     expect(args.join(' ')).not.toContain('secret user prompt');
     expect(args).toEqual(
-      expect.arrayContaining(['--output-format', 'streaming-messages-json', '-m', 'grok-4.6', '--cwd', '/tmp/work', '--effort', 'high']),
+      expect.arrayContaining([
+        '--output-format',
+        'streaming-messages-json',
+        '--permission-mode',
+        'acceptEdits',
+        '--allow',
+        'Edit',
+        '--allow',
+        'Write',
+        '-m',
+        'grok-4.6',
+        '--cwd',
+        '/tmp/work',
+        '--effort',
+        'high',
+      ]),
     );
+    expect(args).not.toContain('--always-approve');
   });
 
   it('sends desktop tools through grok agent stdio, not a flag headless grok rejects', () => {
@@ -54,6 +71,23 @@ describe('grokBuildArgs', () => {
     expect(args).toContain('-r');
     expect(args).toContain('abc-session');
     expect(args).not.toContain('--session');
+  });
+});
+
+describe('toolTraceTitle', () => {
+  it('names a write by its path and leaves the file body off the line', () => {
+    expect(
+      toolTraceTitle({
+        file_path: 'C:\\Users\\haris\\AppData\\Local\\hermes\\harnessbot-data\\workspace\\youtube-shorts-ai-news\\WORKFLOW.md',
+        content: 'the whole pipeline document',
+      }),
+    ).toBe('youtube-shorts-ai-news/WORKFLOW.md');
+  });
+
+  it('keeps a shell command to its first line', () => {
+    expect(toolTraceTitle({ command: 'New-Item -ItemType Directory pipe\nSet-Content file "secret body"' })).toBe(
+      'New-Item -ItemType Directory pipe',
+    );
   });
 });
 

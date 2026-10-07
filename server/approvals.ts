@@ -1,8 +1,11 @@
-import type { BotRecord, DecisionLogEntry, OptionCardData, ThreadId } from '../shared/types.ts';
+import type { BotRecord, DecisionLogEntry, InitiatorKind, OptionCardData, ThreadId } from '../shared/types.ts';
 import type { RequestOutcome, RequestSource, RuntimeEvent } from './contracts.ts';
 import { countAction, isComputerTool, MAX_COMPUTER_ACTIONS } from './computer.ts';
-import { appendNdjson, dataPath } from './paths.ts';
+import { routineHoldsApprovals } from './routine-hold.ts';
+import { appendNdjson, dataPath, readNdjsonTail } from './paths.ts';
+import { redactSecretsInText } from './redact.ts';
 import { store } from './store.ts';
+import { turnOrigin, type TurnOrigin } from './turn-origin.ts';
 import fs from 'node:fs';
 
 /**
@@ -49,6 +52,7 @@ export interface PendingRequest {
   summary: string;
   allowKey?: string;
   approvalScope?: 'local-computer';
+  origin: TurnOrigin;
   openedAt: number;
   timer: NodeJS.Timeout;
 }
@@ -88,14 +92,27 @@ class ApprovalBroker {
 
     const scope = event.approvalScope;
     const allowKey = event.allowKey;
+    const origin = turnOrigin(event.threadId);
     const held = event.requestKind === 'permission' ? isDestructive(`${event.toolName ?? ''} ${event.summary}`) : null;
+    // A grant clicked while someone was in chat does not travel with a routine or a handoff.
+    const unattended = origin.kind === 'routine' || origin.kind === 'handoff';
 
     if (event.requestKind === 'permission' && isComputerTool(event.toolName, scope)) {
       const cap = countAction(bot.id);
       if (!cap.allowed) {
-        this.record(bot, event, requestId, 'unavailable', 'system', allowKey, scope);
+        this.record(bot, event, requestId, 'unavailable', 'system', origin, allowKey, scope);
         this.resolver(
-          { requestId, botId: bot.id, threadId: bot.threadId, messageId: '', instanceId, summary: event.summary, openedAt: Date.now(), timer: 0 as never },
+          {
+            requestId,
+            botId: bot.id,
+            threadId: bot.threadId,
+            messageId: '',
+            instanceId,
+            summary: event.summary,
+            origin,
+            openedAt: Date.now(),
+            timer: 0 as never,
+          },
           'unavailable',
           'system',
         );
@@ -111,10 +128,20 @@ class ApprovalBroker {
 
     // A remembered grant only applies inside its own scope. A cloud-tool grant can
     // never authorise the real keyboard and mouse (HB-TRD-001 consideration 5).
-    if (event.requestKind === 'permission' && allowKey && !held && this.remembered(bot, allowKey, scope)) {
-      this.record(bot, event, requestId, 'allowed-once', 'auto', allowKey, scope);
+    if (event.requestKind === 'permission' && allowKey && !held && !unattended && this.remembered(bot, allowKey, scope)) {
+      this.record(bot, event, requestId, 'allowed-once', 'auto', origin, allowKey, scope);
       this.resolver(
-        { requestId, botId: bot.id, threadId: bot.threadId, messageId: '', instanceId, summary: event.summary, openedAt: Date.now(), timer: 0 as never },
+        {
+          requestId,
+          botId: bot.id,
+          threadId: bot.threadId,
+          messageId: '',
+          instanceId,
+          summary: event.summary,
+          origin,
+          openedAt: Date.now(),
+          timer: 0 as never,
+        },
         'allowed-once',
         'auto',
       );
@@ -123,10 +150,25 @@ class ApprovalBroker {
 
     // autoApprove continues without stopping — except for questions, which need a
     // human answer by definition, and except for the destructive hold list.
-    if (bot.autoApprove && event.requestKind === 'permission' && !held && !scope) {
-      this.record(bot, event, requestId, 'allowed-once', 'auto', allowKey, scope);
+    // A routine turn still asks before computer use, even when the bot auto-approves chat tools.
+    // The hold is the routine's own thread. The task switcher can point bot.threadId elsewhere
+    // while that turn is still the one asking to use the computer.
+    const routineComputer =
+      routineHoldsApprovals(event.threadId) && (scope === 'local-computer' || isComputerTool(event.toolName, scope));
+    if (bot.autoApprove && event.requestKind === 'permission' && !held && !scope && !routineComputer) {
+      this.record(bot, event, requestId, 'allowed-once', 'auto', origin, allowKey, scope);
       this.resolver(
-        { requestId, botId: bot.id, threadId: bot.threadId, messageId: '', instanceId, summary: event.summary, openedAt: Date.now(), timer: 0 as never },
+        {
+          requestId,
+          botId: bot.id,
+          threadId: bot.threadId,
+          messageId: '',
+          instanceId,
+          summary: event.summary,
+          origin,
+          openedAt: Date.now(),
+          timer: 0 as never,
+        },
         'allowed-once',
         'auto',
       );
@@ -171,6 +213,7 @@ class ApprovalBroker {
       summary: event.summary,
       allowKey,
       approvalScope: scope,
+      origin,
       openedAt: Date.now(),
       timer,
     });
@@ -225,6 +268,7 @@ class ApprovalBroker {
         source,
         allowKey: req.allowKey,
         approvalScope: req.approvalScope,
+        ...initiatorFields(req.origin),
       });
     }
 
@@ -258,6 +302,7 @@ class ApprovalBroker {
     requestId: string,
     outcome: RequestOutcome,
     source: RequestSource,
+    origin: TurnOrigin,
     allowKey?: string,
     scope?: 'local-computer',
   ): void {
@@ -272,8 +317,18 @@ class ApprovalBroker {
       source,
       allowKey,
       approvalScope: scope,
+      ...initiatorFields(origin),
     });
   }
+}
+
+function initiatorFields(origin: TurnOrigin | undefined): Pick<DecisionLogEntry, 'initiatorKind' | 'initiatorId' | 'initiatorLabel'> {
+  const kind: InitiatorKind = origin?.kind ?? 'person';
+  return {
+    initiatorKind: kind,
+    ...(origin?.id ? { initiatorId: origin.id } : {}),
+    ...(origin?.label ? { initiatorLabel: origin.label } : {}),
+  };
 }
 
 const DECISIONS_FILE = dataPath('decisions.ndjson');
@@ -289,16 +344,26 @@ function writeDecision(entry: DecisionLogEntry): void {
 }
 
 export function readDecisions(limit = 200): DecisionLogEntry[] {
-  try {
-    return fs
-      .readFileSync(DECISIONS_FILE, 'utf8')
-      .trim()
-      .split('\n')
-      .slice(-limit)
-      .map((l) => JSON.parse(l) as DecisionLogEntry);
-  } catch {
-    return [];
-  }
+  return readNdjsonTail(DECISIONS_FILE, limit) as DecisionLogEntry[];
+}
+
+const REFUSAL_OUTCOMES = new Set(['rejected', 'unavailable']);
+
+/**
+ * A short redacted list for the next turn. The bot should say it was not granted
+ * the action, rather than finding a way around the block.
+ */
+export function recentRefusals(botId: string, limit = 5): string {
+  const rows = readDecisions(200)
+    .filter((entry) => entry.botId === botId && REFUSAL_OUTCOMES.has(entry.outcome))
+    .slice(-limit);
+  if (!rows.length) return '';
+  const lines = rows.map((entry) => {
+    const summary = redactSecretsInText(entry.summary).replace(/\s+/g, ' ').slice(0, 140);
+    const who = entry.initiatorKind && entry.initiatorKind !== 'person' ? `, ${entry.initiatorKind}` : '';
+    return `- ${entry.tool ?? 'action'}: not granted — ${summary}${who}`;
+  });
+  return `Recent refusals for you. You were not granted these. Say that plainly, and do not work around the block:\n${lines.join('\n')}`;
 }
 
 /** Card options map to outcomes in exactly one place. */

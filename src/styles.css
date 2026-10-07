@@ -158,6 +158,33 @@ body {
   border-radius: 4px;
 }
 
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']) {
+  cursor: pointer;
+}
+
+/* Selected roster row: inset fill plus an accent bar, visible on light and dark skins. */
+.is-selected {
+  background: var(--color-inset);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* Chat rail buttons collapse under laptop width. The menu takes their place. */
+.panel-icons {
+  display: none;
+}
+.panel-menu {
+  display: block;
+}
+@media (min-width: 1100px) {
+  .panel-icons {
+    display: flex;
+  }
+  .panel-menu {
+    display: none;
+  }
+}
+
 /* Hairlines, not shadows: a shadow-only separator disappears on the light skins. */
 .hairline {
   border-color: var(--color-hairline);

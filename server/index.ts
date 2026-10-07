@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import type { BotRecord } from '../shared/types.ts';
-import { CREDENTIAL_TARGETS, type CredentialTargetId } from '../shared/types.ts';
+import type { BotRecord, Routine, RoutineSchedule } from '../shared/types.ts';
+import { CREDENTIAL_TARGETS, isAvatarShape, type CredentialTargetId } from '../shared/types.ts';
 import { approvals, readDecisions } from './approvals.ts';
 import { canonicalProfileId, getConfig, publicConfig, saveConfig, setSecret, SECRET_KEYS } from './config.ts';
 import * as connectors from './connectors.ts';
@@ -17,8 +17,13 @@ import { registry } from './harness/registry.ts';
 import * as memory from './memory.ts';
 import * as org from './org.ts';
 import { mimeForFilename } from './attachments.ts';
-import { DATA_DIR, dataPath, ensureDir, findAppSource, newId } from './paths.ts';
+import { DATA_DIR, dataPath, ensureDir, findAppSource, newId, readNdjsonTail, threadLogPath } from './paths.ts';
 import * as routines from './routines.ts';
+import { filterMessages } from './search.ts';
+import { buildRosterBackup } from './backup.ts';
+import { packageStatus, explicitSecretValue } from './desktop.ts';
+import { authorizePhoneAction, capturePhone, queryPhones } from './phone.ts';
+import { botSpentUsd, evaluateSpend } from './spend.ts';
 import * as plugins from './plugins.ts';
 import * as providers from './providers.ts';
 import { bridgeStatus } from './hermes-bridge.ts';
@@ -30,6 +35,18 @@ import * as turns from './turns.ts';
 import * as vm from './vm.ts';
 import { notifications } from './notifications.ts';
 import { botForToken, mintInternalToken, revokeInternalToken } from './internal-tokens.ts';
+import { forgetBot } from './forget-bot.ts';
+import * as jobs from './jobs.ts';
+import { jobEvents } from './jobs.ts';
+import { threadActivity } from './activity-feed.ts';
+import { listHistory } from './history.ts';
+import * as workflows from './workflows.ts';
+import { workflowEvents } from './workflows.ts';
+import { VERSION } from './version.ts';
+import { botDuplicateFields } from './bot-copy.ts';
+import { mergeModelSelection } from './model-selection.ts';
+import { rejectionForSendError } from './send-http.ts';
+import { staticMiss } from './static-miss.ts';
 import { createWebhook, deleteWebhook, listWebhooks, rotateWebhook, startWebhookServer } from './webhooks.ts';
 
 /**
@@ -148,6 +165,10 @@ const bad = (message: string): never => {
 const notFound = (message = 'not found'): never => {
   throw new HttpError(404, message);
 };
+function rejectSend(error: string | undefined): void {
+  const rejection = rejectionForSendError(error);
+  if (rejection) throw new HttpError(rejection.status, rejection.message);
+}
 
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
 
@@ -187,29 +208,70 @@ interface Client {
 
 const clients = new Map<string, Client>();
 const REPLAY_MAX = 500;
-const replay: { kind: string; data: unknown }[] = [];
+const serverBootId = randomUUID();
+let seq = 0;
+const replay: { seq: number; kind: string; data: unknown }[] = [];
+
+function dataFrame(kind: string, data: unknown, id?: number): string {
+  const prefix = id === undefined ? '' : `id: ${id}\n`;
+  return `${prefix}event: ${kind}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function sendFrame(client: Client, frame: string): void {
+  try {
+    client.res.write(frame);
+  } catch {
+    // A disconnected client must not abort the write for everyone else.
+    clients.delete(client.id);
+  }
+}
+
+/** Integer cursor, or null when the client did not ask for one (full replay). */
+function parseSince(raw: string | null): number | null {
+  if (raw === null || raw === '') return null;
+  if (!/^-?\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * True when `since` is older than the oldest frame we still hold, so replaying
+ * the ring would skip a hole. An empty ring that has already advanced means the
+ * same thing: everything the client missed has fallen out.
+ */
+function resumeGap(since: number): boolean {
+  const oldest = replay[0]?.seq;
+  if (oldest === undefined) return since < seq;
+  return since < oldest - 1;
+}
 
 /**
  * The single place store changes and runtime events become SSE. Everything the UI
  * knows arrives through here, so there is exactly one write path to fold.
  */
 function broadcast(kind: string, data: unknown): void {
-  // Screen frames are large and worthless after the moment they happen: never replay.
-  if (kind !== 'screen') {
-    replay.push({ kind, data });
-    if (replay.length > REPLAY_MAX) replay.shift();
-  }
-  const frame = `event: ${kind}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of clients.values()) {
-    if (kind === 'screen' && !client.screens) continue;
-    try {
-      client.res.write(frame);
-    } catch {
-      // A disconnected client must not abort the write for everyone else.
-      clients.delete(client.id);
+  // Screen frames are large and worthless after the moment they happen: never
+  // replay, and never spend a resume cursor on a frame a reconnect cannot see.
+  if (kind === 'screen') {
+    const frame = dataFrame(kind, data);
+    for (const client of clients.values()) {
+      if (!client.screens) continue;
+      sendFrame(client, frame);
     }
+    return;
   }
+  const id = ++seq;
+  replay.push({ seq: id, kind, data });
+  if (replay.length > REPLAY_MAX) replay.shift();
+  const frame = dataFrame(kind, data, id);
+  for (const client of clients.values()) sendFrame(client, frame);
 }
+
+jobEvents.on('job', (job) => broadcast('job', job));
+jobEvents.on('job.deleted', (data) => broadcast('job.deleted', data));
+workflowEvents.on('workflow', (workflow) => broadcast('workflow', workflow));
+workflowEvents.on('workflow.deleted', (data) => broadcast('workflow.deleted', data));
+workflowEvents.on('workflow.run', (run) => broadcast('workflow.run', run));
 
 function wireBot(botId: string): unknown {
   const bot = store.getBot(botId);
@@ -258,7 +320,7 @@ notifications.on('notify', (n) => broadcast('notify', n));
 
 get('/api/health', () => ({
   app: 'harnessbot',
-  version: '0.1.44',
+  version: VERSION,
   pid: process.pid,
   // True only when the process will actually answer GET / with the UI, not merely
   // when an env var is set. The Hermes desktop plugin uses this to decide whether
@@ -276,8 +338,21 @@ get('/api/events', ({ req, res, url }) => {
   const client: Client = { id: randomUUID(), res, screens: url.searchParams.get('screens') !== 'off' };
   clients.set(client.id, client);
 
-  res.write(`event: hello\ndata: ${JSON.stringify({ clientId: client.id, replay: replay.length })}\n\n`);
-  for (const item of replay) res.write(`event: ${item.kind}\ndata: ${JSON.stringify(item.data)}\n\n`);
+  const since = parseSince(url.searchParams.get('since'));
+  const boot = url.searchParams.get('boot');
+  // A cursor from a previous process, or a hole in the ring, cannot be resumed.
+  // Say so. The client re-reads the roster instead of trusting a partial replay.
+  const resync = (Boolean(boot) && boot !== serverBootId) || (since !== null && resumeGap(since));
+
+  res.write(dataFrame('hello', { clientId: client.id, replay: replay.length, serverBootId }));
+  if (resync) {
+    res.write(dataFrame('resync', { serverBootId }));
+  } else {
+    for (const item of replay) {
+      if (since !== null && item.seq <= since) continue;
+      res.write(dataFrame(item.kind, item.data, item.seq));
+    }
+  }
 
   let ping: NodeJS.Timeout;
   const forget = (): void => {
@@ -329,6 +404,7 @@ const BOT_PATCH_FIELDS: (keyof BotRecord)[] = [
   'color',
   'mascotExpression',
   'avatarUrl',
+  'avatarShape',
   'avatarCrop',
   'notifications',
   'modelSelection',
@@ -336,6 +412,7 @@ const BOT_PATCH_FIELDS: (keyof BotRecord)[] = [
   'cloudBackend',
   'autoStartVps',
   'cwd',
+  'workFolder',
   'autoApprove',
   'autoReview',
   'speakReplies',
@@ -356,6 +433,7 @@ const BOT_PATCH_FIELDS: (keyof BotRecord)[] = [
   'browserProfile',
   'threadId',
   'lean',
+  'spendCapUsd',
 ];
 
 patch('/api/bots/:id', async ({ params, body }) => {
@@ -373,19 +451,44 @@ patch('/api/bots/:id', async ({ params, body }) => {
   // Normalise a falsy manager to absent rather than storing a null nobody reads.
   if ('reportsTo' in input && !input.reportsTo) clean.reportsTo = undefined;
   if ('lean' in input && input.lean !== true && input.lean !== false) clean.lean = undefined;
+  if ('workFolder' in input) {
+    if (input.workFolder == null || input.workFolder === '') clean.workFolder = undefined;
+    else {
+      const folder = jobs.normalizeWorkFolder(input.workFolder);
+      if (!folder) bad('work folder must be an absolute path');
+      clean.workFolder = folder;
+    }
+  }
+  if ('avatarShape' in input) {
+    const shape = input.avatarShape;
+    if (shape == null || shape === '') clean.avatarShape = undefined;
+    else if (!isAvatarShape(shape)) bad('unknown avatar shape');
+    else clean.avatarShape = shape;
+  }
+  if ('spendCapUsd' in input) {
+    const cap = input.spendCapUsd;
+    if (cap === null || cap === '' || cap === undefined) clean.spendCapUsd = undefined;
+    else if (typeof cap === 'number' && Number.isFinite(cap) && cap > 0) clean.spendCapUsd = cap;
+    else bad('spend cap must be a positive amount');
+  }
   if (clean.browserProfile !== undefined) {
     const id = canonicalProfileId(String(clean.browserProfile));
     if (!id) bad('invalid browser profile id');
     clean.browserProfile = id!;
   }
+  if ('modelSelection' in input) {
+    try {
+      clean.modelSelection = mergeModelSelection(bot.modelSelection, input.modelSelection);
+    } catch (err) {
+      bad(err instanceof Error ? err.message : 'invalid modelSelection');
+    }
+  }
   if ('chiefOfStaff' in input) store.setChiefOfStaff(bot.id, input.chiefOfStaff === true);
   return wireBot(store.updateBot(params.id!, clean)!.id);
 });
 
-del('/api/bots/:id', ({ params }) => {
-  turns.interrupt(params.id!);
-  approvals.cancelForBot(params.id!);
-  store.deleteBot(params.id!);
+del('/api/bots/:id', async ({ params }) => {
+  await forgetBot(params.id!);
   return { ok: true };
 });
 
@@ -393,8 +496,7 @@ post('/api/bots/:id/read', ({ params }) => wireBot(store.updateBot(params.id!, {
 
 post('/api/bots/:id/duplicate', ({ params }) => {
   const bot = store.getBot(params.id!) ?? notFound('no such bot');
-  const { id: _i, threadId: _t, tasks: _k, createdAt: _c, ...rest } = bot;
-  return wireBot(store.createBot({ ...rest, name: `${bot.name} copy` }).id);
+  return wireBot(store.createBot(botDuplicateFields(bot)).id);
 });
 
 get('/api/bots/:id/tasks', ({ params }) => {
@@ -464,7 +566,7 @@ post('/api/bots/:id/messages', async ({ params, body }) => {
     await turns.injectNow({ botId: params.id!, ...input, text });
     return { ok: true };
   }
-  return turns.sendToBot({
+  const result = await turns.sendToBot({
     botId: params.id!,
     threadId: input.threadId,
     text,
@@ -474,6 +576,8 @@ post('/api/bots/:id/messages', async ({ params, body }) => {
     context,
     replyToId: input.replyToId,
   });
+  rejectSend(result.error);
+  return result;
 });
 
 post('/api/bots/:id/interrupt', async ({ params, body }) => {
@@ -523,8 +627,7 @@ post('/api/bots/:id/messages/:messageId/edit', async ({ params, body }) => {
   const threadId = input.threadId ?? bot.threadId;
   if (typeof input.text !== 'string' || !input.text.trim()) bad('text is required');
   const result = await turns.editUserMessage(bot.id, threadId, params.messageId!, input.text);
-  if (result.error === 'no such message' || result.error === 'no such bot') notFound(result.error);
-  if (result.error === 'text is required') bad(result.error);
+  rejectSend(result.error);
   return { messageId: result.messageId, queued: result.queued };
 });
 
@@ -570,16 +673,9 @@ post('/api/threads/:threadId/reactions', async ({ params, body }) => {
 
 get('/api/threads/:threadId/events', ({ params, url }) => {
   const limit = Number(url.searchParams.get('limit') ?? 200);
-  try {
-    return fs
-      .readFileSync(dataPath('events', `${params.threadId}.ndjson`), 'utf8')
-      .trim()
-      .split('\n')
-      .slice(-limit)
-      .map((l) => JSON.parse(l));
-  } catch {
-    return [];
-  }
+  const file = threadLogPath('events', params.threadId!);
+  if (!file) return [];
+  return readNdjsonTail(file, limit);
 });
 
 get('/api/threads/:threadId/export', ({ params }) => ({
@@ -613,16 +709,17 @@ del('/api/groups/:id', ({ params }) => {
 });
 
 post('/api/groups/:id/messages', async ({ params, body }) => {
+  const group = store.getGroup(params.id!) ?? notFound('no such room');
   const input = await body();
   const text = typeof input.text === 'string' ? input.text : '';
   const attachments = Array.isArray(input.attachments) ? input.attachments : undefined;
   const context = typeof input.context === 'string' ? input.context : undefined;
   if (!text.trim() && !attachments?.length && !context?.trim()) bad('text or an attachment is required');
   if (input.channelMode === 'goal') {
-    void turns.runGoal(params.id!, text);
+    void turns.runGoal(group.id, text);
     return { started: true };
   }
-  return turns.sendToGroup(params.id!, text, {
+  return turns.sendToGroup(group.id, text, {
     threadId: input.threadId,
     sendId: input.sendId,
     attachments,
@@ -649,13 +746,40 @@ get('/api/search', ({ url }) => {
   const query = url.searchParams.get('q') ?? '';
   if (query.length < 2) return { bots: [], messages: [] };
   const lower = query.toLowerCase();
+  const cardRaw = url.searchParams.get('card');
+  const card = cardRaw === 'approval' || cardRaw === 'tool' || cardRaw === 'goal' ? cardRaw : undefined;
+  const from = url.searchParams.has('from') ? Number(url.searchParams.get('from')) : undefined;
+  const to = url.searchParams.has('to') ? Number(url.searchParams.get('to')) : undefined;
   return {
     bots: store
       .listBots()
       .filter((b) => !b.hidden && (b.name.toLowerCase().includes(lower) || b.title.toLowerCase().includes(lower)))
       .map((b) => ({ id: b.id, name: b.name, title: b.title, color: b.color })),
-    messages: store.search(query, 100),
+    messages: filterMessages({
+      query,
+      botId: url.searchParams.get('bot') || url.searchParams.get('botId') || undefined,
+      roomId: url.searchParams.get('room') || url.searchParams.get('roomId') || undefined,
+      from: from != null && Number.isFinite(from) ? from : undefined,
+      to: to != null && Number.isFinite(to) ? to : undefined,
+      card,
+    }),
   };
+});
+
+get('/api/backup', () => buildRosterBackup());
+
+get('/api/package-status', () => packageStatus());
+
+get('/api/phone', async () => queryPhones());
+
+post('/api/phone/:serial/screenshot', async ({ params }) => capturePhone(params.serial!));
+
+post('/api/phone/actions', async ({ body }) => {
+  const input = await body();
+  const action = String(input.action ?? '');
+  if (action !== 'send' && action !== 'pay' && action !== 'delete') bad('action must be send, pay, or delete');
+  // The decision is the gate. Nothing is sent to the phone from this route.
+  return authorizePhoneAction(action, input.approved === true);
 });
 
 const ATTACHMENTS = ensureDir(dataPath('attachments'));
@@ -893,6 +1017,8 @@ post('/api/bots/:id/secret-cards/:messageId', async ({ params, body }) => {
   // Only allowlisted credential targets, and only ever written, never read back.
   // A bare `throw` rather than the bad() helper, so the compiler narrows `target` too.
   if (!target || !CREDENTIAL_TARGETS.includes(target)) throw new HttpError(400, 'not a credential card');
+  const secretValue = explicitSecretValue(input.value);
+  if (!secretValue) bad('an explicit value is required');
   const map: Record<CredentialTargetId, string> = {
     xaiApiKey: 'xai.key',
     boxToken: 'box.token',
@@ -900,7 +1026,7 @@ post('/api/bots/:id/secret-cards/:messageId', async ({ params, body }) => {
     ttsKey: 'elevenlabs.key',
     openaiImageApiKey: 'openai.imageKey',
   };
-  setSecret(map[target], String(input.value ?? ''));
+  setSecret(map[target], secretValue);
   store.patchMessage(bot.threadId, message.id, { secret: { ...message.secret!, provided: true } });
   await registry.reload();
   return { ok: true };
@@ -1280,37 +1406,252 @@ post('/api/sidebar-sections', async ({ body }) => {
 
 // -- routes: automation ------------------------------------------------------
 
-get('/api/routines', () => routines.listRoutines());
+get('/api/routines', () => routines.listRoutines().map((routine) => ({ ...routine, spend: routines.routineSpendStatus(routine) })));
+
+post('/api/bots/:id/spend-confirm', ({ params }) => {
+  const bot = store.getBot(params.id!) ?? notFound('no such bot');
+  const spent = botSpentUsd(bot);
+  store.updateBot(bot.id, { spendConfirmedUsd: spent });
+  turns.releaseSpendHold(bot.id);
+  return { ...wireBot(bot.id) as object, verdict: evaluateSpend({ spentUsd: spent, capUsd: bot.spendCapUsd, confirmedUsd: spent }) };
+});
+
+get('/api/bots/:id/spend', ({ params }) => {
+  const bot = store.getBot(params.id!) ?? notFound('no such bot');
+  const spentUsd = botSpentUsd(bot);
+  return {
+    spentUsd,
+    capUsd: bot.spendCapUsd ?? null,
+    confirmedUsd: bot.spendConfirmedUsd ?? null,
+    verdict: evaluateSpend({ spentUsd, capUsd: bot.spendCapUsd, confirmedUsd: bot.spendConfirmedUsd }),
+  };
+});
 
 post('/api/routines', async ({ body }) => {
   const input = await body();
   if (!input.botId || !input.prompt) bad('botId and prompt are required');
-  const routine = routines.createRoutine({
-    name: input.name ?? 'Routine',
-    prompt: input.prompt,
-    botId: input.botId,
-    runOn: input.runOn === 'cloud' ? 'cloud' : 'harnessbot',
-    enabled: input.enabled !== false,
-    schedule: input.schedule,
-    durationMinutes: Math.min(240, Math.max(15, Number(input.durationMinutes ?? 30))),
-    attachments: input.attachments,
-    sourceThreadId: input.sourceThreadId,
-  });
+  let schedule: RoutineSchedule;
+  try {
+    schedule = routines.parseSchedule(input.schedule);
+  } catch (err) {
+    return bad(err instanceof Error ? err.message : 'invalid schedule');
+  }
+  const cap = input.spendCapUsd;
+  let routine: Routine;
+  try {
+    routine = routines.createBoundRoutine({
+      name: input.name ?? 'Routine',
+      prompt: input.prompt,
+      botId: input.botId,
+      runOn: input.runOn === 'cloud' ? 'cloud' : 'harnessbot',
+      enabled: input.enabled !== false,
+      schedule,
+      durationMinutes: Math.min(240, Math.max(1, Number(input.durationMinutes ?? 30))),
+      attachments: input.attachments,
+      sourceThreadId: input.sourceThreadId,
+      spendCapUsd: typeof cap === 'number' && Number.isFinite(cap) && cap > 0 ? cap : undefined,
+      jobId: typeof input.jobId === 'string' ? input.jobId : undefined,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'could not create the routine';
+    if (message === 'jobId must be a job on this bot' || message === 'this job already has a schedule') bad(message);
+    throw err;
+  }
   broadcast('routine', routine);
   return routine;
 });
 
 patch('/api/routines/:id', async ({ params, body }) => {
-  const routine = routines.updateRoutine(params.id!, await body()) ?? notFound('no such routine');
+  const input = await body();
+  const patch: Partial<Routine> = {};
+  if ('name' in input) patch.name = String(input.name ?? '').slice(0, 200);
+  if ('prompt' in input) patch.prompt = String(input.prompt ?? '');
+  if ('enabled' in input) patch.enabled = input.enabled === true;
+  if ('runOn' in input) patch.runOn = input.runOn === 'cloud' ? 'cloud' : 'harnessbot';
+  if ('schedule' in input) {
+    try {
+      patch.schedule = routines.parseSchedule(input.schedule);
+    } catch (err) {
+      bad(err instanceof Error ? err.message : 'invalid schedule');
+    }
+  }
+  if ('durationMinutes' in input) patch.durationMinutes = Math.min(240, Math.max(1, Number(input.durationMinutes ?? 30)));
+  if ('spendCapUsd' in input) {
+    const cap = input.spendCapUsd;
+    patch.spendCapUsd = typeof cap === 'number' && Number.isFinite(cap) && cap > 0 ? cap : undefined;
+  }
+  const routine = routines.updateRoutine(params.id!, patch) ?? notFound('no such routine');
   broadcast('routine', routine);
   return routine;
 });
 
 del('/api/routines/:id', ({ params }) => {
   routines.deleteRoutine(params.id!);
+  jobs.unbindRoutine(params.id!);
   broadcast('routine.deleted', { id: params.id });
   return { ok: true };
 });
+
+get('/api/history', ({ url }) => listHistory(url.searchParams.get('q') ?? ''));
+
+get('/api/threads/:threadId/activity', ({ params }) => threadActivity(params.threadId!));
+
+get('/api/workflows', () => workflows.listWorkflows());
+
+get('/api/workflows/runs', ({ url }) => workflows.listWorkflowRuns(url.searchParams.get('workflowId') ?? undefined));
+
+post('/api/workflows', async ({ body }) => {
+  const input = await body();
+  try {
+    return workflows.createWorkflow(input);
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not create the workflow');
+  }
+});
+
+patch('/api/workflows/:id', async ({ params, body }) => {
+  const input = await body();
+  try {
+    return workflows.updateWorkflow(params.id!, input) ?? notFound('no such workflow');
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not update the workflow');
+  }
+});
+
+del('/api/workflows/:id', ({ params }) => {
+  if (!workflows.deleteWorkflow(params.id!)) notFound('no such workflow');
+  return { ok: true };
+});
+
+post('/api/workflows/:id/run', async ({ params, body }) => {
+  const input = await body().catch(() => ({}));
+  const note = input && typeof input.input === 'string' ? input.input : undefined;
+  try {
+    return workflows.runWorkflow(params.id!, note);
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not run the workflow');
+  }
+});
+
+post('/api/workflows/runs/:id/handoff', async ({ params, body }) => {
+  const input = await body();
+  try {
+    return workflows.handoffRun(params.id!, typeof input?.botId === 'string' ? input.botId : '');
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not hand off the step');
+  }
+});
+
+post('/api/workflows/runs/:id/cancel', ({ params }) => {
+  return workflows.cancelWorkflowRun(params.id!) ?? notFound('no such run');
+});
+
+post('/api/workflows/runs/:id/retry', ({ params }) => {
+  try {
+    return workflows.retryWorkflowRun(params.id!);
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not try the step again');
+  }
+});
+
+// -- routes: jobs ------------------------------------------------------------
+
+get('/api/jobs', ({ url }) => jobs.listJobs(url.searchParams.get('botId') ?? undefined));
+
+get('/api/bots/:id/jobs', ({ params }) => {
+  if (!store.getBot(params.id!)) notFound('no such bot');
+  return jobs.listJobs(params.id);
+});
+
+post('/api/bots/:id/jobs', async ({ params, body }) => {
+  if (!store.getBot(params.id!)) notFound('no such bot');
+  const input = await body();
+  try {
+    return jobs.createJob({ botId: params.id!, title: input.title, outcome: input.outcome, acceptance: input.acceptance });
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'could not create the job');
+  }
+});
+
+patch('/api/jobs/:id', async ({ params, body }) => {
+  const input = await body();
+  const job = jobs.updateJob(params.id!, {
+    title: 'title' in input ? input.title : undefined,
+    outcome: 'outcome' in input ? input.outcome : undefined,
+    acceptance: 'acceptance' in input ? input.acceptance : undefined,
+    progress: 'progress' in input ? input.progress : undefined,
+    remaining: 'remaining' in input ? input.remaining : undefined,
+    artifact: 'artifact' in input ? input.artifact : undefined,
+  });
+  return job ?? notFound('no such job');
+});
+
+post('/api/jobs/:id/resume', ({ params }) => jobs.resumeJob(params.id!) ?? notFound('that job cannot be resumed'));
+
+post('/api/jobs/:id/cancel', ({ params }) => jobs.cancelJob(params.id!) ?? notFound('no such job'));
+
+post('/api/jobs/:id/handoff', async ({ params, body }) => {
+  const input = await body();
+  const result = jobs.handoffJob(params.id!, String(input.toBotId ?? ''));
+  if (!result.ok) bad(result.reason);
+  return result;
+});
+
+get('/api/jobs/:id/log', ({ params }) => {
+  if (!jobs.getJob(params.id!)) notFound('no such job');
+  return jobs.listWorkLog(params.id!);
+});
+
+post('/api/jobs/:id/schedule', async ({ params, body }) => {
+  const job = jobs.getJob(params.id!) ?? notFound('no such job');
+  if (job.routineId) {
+    const existing = routines.getRoutine(job.routineId);
+    if (existing) return existing;
+  }
+  if (job.status === 'handed-off' || job.status === 'cancelled') bad('that job is already closed');
+  const input = await body();
+  const time = typeof input.time === 'string' && /^\d{2}:\d{2}$/.test(input.time) ? input.time : '09:00';
+  const weekdays = Array.isArray(input.weekdays) && input.weekdays.length ? input.weekdays.map(Number) : [1, 2, 3, 4, 5];
+  let schedule: RoutineSchedule;
+  try {
+    schedule = routines.parseSchedule({ kind: 'daily', time, weekdays });
+  } catch (err) {
+    return bad(err instanceof Error ? err.message : 'invalid schedule');
+  }
+  let routine: Routine;
+  try {
+    routine = routines.createBoundRoutine({
+      name: job.title,
+      prompt: job.outcome,
+      botId: job.botId,
+      runOn: 'harnessbot',
+      enabled: true,
+      schedule,
+      durationMinutes: 30,
+      jobId: job.id,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'could not create the routine';
+    if (message === 'jobId must be a job on this bot' || message === 'this job already has a schedule') bad(message);
+    throw err;
+  }
+  broadcast('routine', routine);
+  return routine;
+});
+
+post('/api/routines/runs/:runId/confirm', async ({ params }) => {
+  const run = (await routines.confirmCatchUp(params.runId!)) ?? notFound('no catch-up run');
+  broadcast('routine.run', run);
+  return run;
+});
+
+post('/api/routines/:id/spend-confirm', ({ params }) => {
+  const routine = routines.confirmRoutineSpend(params.id!) ?? notFound('no such routine');
+  broadcast('routine', routine);
+  return routine;
+});
+
+get('/api/routines/review', () => routines.listReviewRuns());
 
 post('/api/routines/:id/run', async ({ params }) => {
   const routine = routines.getRoutine(params.id!) ?? notFound('no such routine');
@@ -1511,10 +1852,18 @@ function serveStatic(pathname: string, res: http.ServerResponse): boolean {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\//, '');
   const file = path.resolve(STATIC_DIR, rel);
   if (!containedIn(STATIC_DIR, file)) return false;
-  const target = fs.existsSync(file) && fs.statSync(file).isFile() ? file : path.join(STATIC_DIR, 'index.html');
+  const exists = fs.existsSync(file) && fs.statSync(file).isFile();
+  if (!exists && staticMiss(pathname) === 'missing') return false;
+  const target = exists ? file : path.join(STATIC_DIR, 'index.html');
   if (!containedIn(STATIC_DIR, target) || !fs.existsSync(target) || !fs.statSync(target).isFile()) return false;
-  res.writeHead(200, { 'content-type': MIME[path.extname(target)] ?? 'application/octet-stream' });
-  res.end(fs.readFileSync(target));
+  const body = fs.readFileSync(target);
+  const ext = path.extname(target);
+  res.writeHead(200, {
+    'content-type': MIME[ext] ?? 'application/octet-stream',
+    'content-length': body.length,
+    'cache-control': pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+  });
+  res.end(body);
   return true;
 }
 
@@ -1619,10 +1968,22 @@ export async function start(port = PORT): Promise<http.Server> {
   registry.watchConfig();
   turns.startEventRouting();
   routines.startScheduler();
+  workflows.startWorkflowScheduler();
+  jobs.startJobQueue();
   vm.startIdleReaper();
   for (const bot of store.listBots()) mintInternalToken(bot.id);
 
-  await new Promise<void>((resolve) => server.listen(port, HOST, resolve));
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error) => {
+      server.off('error', onError);
+      reject(err);
+    };
+    server.once('error', onError);
+    server.listen(port, HOST, () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
   startWebhookServer();
   return server;
 }
@@ -1638,6 +1999,10 @@ if (isMain) {
       process.stdout.write(`ui       not served on this origin (set HB_STATIC_DIR, or open Vite on :5199)\n`);
     }
     process.stdout.write(`data     ${DATA_DIR}\n`);
+  }).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`${message}\n`);
+    process.exit(1);
   });
 
   const shutdown = (): void => {

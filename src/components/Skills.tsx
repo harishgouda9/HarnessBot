@@ -4,6 +4,7 @@ import { api } from '../api.ts';
 import { useStore } from '../store.tsx';
 import { Avatar } from './Avatar.tsx';
 import { Icon } from './Icons.tsx';
+import { PageHeader } from './PageHeader.tsx';
 
 /**
  * Skills: a library to adopt from, an installed list, and proposals waiting to be
@@ -30,16 +31,6 @@ interface SkillsData {
   /** Always sent: a bot's page has to show what it inherits from the workspace. */
   global: SkillSummary[];
   plugins: InstalledPlugin[];
-}
-
-function PageHeader({ title, children }: { title: string; children?: React.ReactNode }) {
-  return (
-    <header className="flex flex-wrap items-center gap-2 border-b px-4 py-2.5 hairline" style={{ background: 'var(--color-panel)' }}>
-      <h1 className="text-[15px] font-semibold">{title}</h1>
-      <span className="flex-1" />
-      {children}
-    </header>
-  );
 }
 
 function BotPicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
@@ -207,7 +198,7 @@ export function SkillsPage() {
                   <Icon name="apps" size={16} />
                 </span>
               ) : (
-                <Avatar name={bot!.name} color={bot!.color} size={28} />
+                <Avatar name={bot!.name} color={bot!.color} avatarShape={bot!.avatarShape} size={28} />
               )}
               <div className="text-[13px]">
                 {isGlobal ? (

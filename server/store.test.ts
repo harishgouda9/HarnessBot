@@ -3,10 +3,21 @@ import { describe, expect, it } from 'vitest';
 import { repairOrg, store, stripLegacyHelpers } from './store.ts';
 import { redactSecretsInText } from './redact.ts';
 import { dataPath } from './paths.ts';
-import type { BotRecord } from '../shared/types.ts';
+import { AVATAR_SHAPES, type BotRecord } from '../shared/types.ts';
 
 const makeBot = (name: string, extra: Partial<BotRecord> = {}) =>
   store.createBot({ name, modelSelection: { instanceId: 'fake', model: 'fake-1' }, ...extra });
+
+describe('bot silhouette', () => {
+  it('keeps every known shape and drops an unknown one', () => {
+    for (const shape of AVATAR_SHAPES) {
+      const bot = makeBot(shape, { avatarShape: shape });
+      expect(store.getBot(bot.id)!.avatarShape).toBe(shape);
+    }
+    const dropped = makeBot('NotAShape', { avatarShape: 'star' as never });
+    expect(store.getBot(dropped.id)!.avatarShape).toBeUndefined();
+  });
+});
 
 describe('store persistence', () => {
   it('redacts bot-authored text but leaves user text exactly as typed', () => {

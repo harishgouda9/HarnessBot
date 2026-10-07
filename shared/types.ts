@@ -93,6 +93,52 @@ export interface InstalledPackageMetadata {
   mcpServers?: string[];
 }
 
+/** Every silhouette the profile can switch. A missing value is the rounded square. */
+export const AVATAR_SHAPES = [
+  'rounded',
+  'circle',
+  'square',
+  'hexagon',
+  'diamond',
+  'shield',
+  'pill',
+  'oval',
+  'arch',
+  'cat',
+  'heart',
+  'flower',
+  'drop',
+  'puff',
+  'block',
+  'mochi',
+  'bun',
+] as const;
+export type AvatarShape = (typeof AVATAR_SHAPES)[number];
+
+export const AVATAR_SHAPE_LABELS: Record<AvatarShape, string> = {
+  rounded: 'Rounded',
+  circle: 'Circle',
+  square: 'Square',
+  hexagon: 'Hexagon',
+  diamond: 'Diamond',
+  shield: 'Shield',
+  pill: 'Pill',
+  oval: 'Oval',
+  arch: 'Arch',
+  cat: 'Cat',
+  heart: 'Heart',
+  flower: 'Flower',
+  drop: 'Drop',
+  puff: 'Puff',
+  block: 'Block',
+  mochi: 'Mochi',
+  bun: 'Bun',
+};
+
+export function isAvatarShape(value: unknown): value is AvatarShape {
+  return typeof value === 'string' && (AVATAR_SHAPES as readonly string[]).includes(value);
+}
+
 export interface BotRecord {
   id: string;
   /** ACTIVE task thread. All turns read this. */
@@ -105,6 +151,9 @@ export interface BotRecord {
   color: HarnessbotColor;
   mascotExpression?: string | null;
   avatarUrl?: string;
+  /** Silhouette. Absent means the original rounded square. */
+  avatarShape?: AvatarShape;
+  /** Photo crop, separate from the silhouette. */
   avatarCrop?: 'mascot' | 'circle' | 'rounded' | 'square';
   unread: boolean;
   modelSelection: ModelSelection;
@@ -117,9 +166,18 @@ export interface BotRecord {
    * costs less, and can route a short message to a smaller model on the same provider.
    */
   lean?: boolean;
+  /** USD. Absent means this bot is not capped. */
+  spendCapUsd?: number;
+  /** Spend the user has explicitly allowed. Below this, a cap does not block. */
+  spendConfirmedUsd?: number;
   cloudBackend?: CloudBackend;
   autoStartVps?: boolean;
   cwd?: string;
+  /**
+   * The one folder a job may pin as its working directory. It is not permission
+   * to send, pay, or delete — those still stop for an explicit approval.
+   */
+  workFolder?: string;
   autoApprove?: boolean;
   autoReview?: AutoReview;
   /** Narrow keys from "Always allow" — e.g. Bash:git. Never a blanket grant. */
@@ -331,17 +389,76 @@ export type RoutineRunStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'missed';
+  | 'missed'
+  /** Due while the harness was stopped. Stays here until the user confirms. */
+  | 'catch-up';
 
 export type RoutineSchedule =
   | { kind: 'once'; at: number }
-  | { kind: 'daily'; time: string; weekdays: number[] };
+  | { kind: 'daily'; time: string; weekdays: number[] }
+  | { kind: 'interval'; everyMinutes: number }
+  | { kind: 'monthly'; day: number; time: string };
+
+/** Told to the bot on every job turn. Send, pay, and delete stay on an explicit approval. */
+export const JOB_APPROVAL_LINE = 'Send, pay, and delete need an explicit approval before they run.';
+
+export type JobStatus = 'queued' | 'active' | 'blocked' | 'handed-off' | 'done' | 'cancelled';
+
+export type JobArtifactKind = 'file' | 'pull-request' | 'document' | 'calendar' | 'note';
+
+/** A deliverable linked from the job. A file is checked on disk when a run finishes. */
+export interface JobArtifact {
+  kind: JobArtifactKind;
+  label: string;
+  href?: string;
+}
+
+export interface JobRecord {
+  id: string;
+  botId: string;
+  title: string;
+  outcome: string;
+  /** What "done" means. The run stops when the bot reports this is met, or when it is blocked. */
+  acceptance: string;
+  status: JobStatus;
+  /** What already succeeded. The next run reads this instead of the chat scroll. */
+  progress: string;
+  remaining: string;
+  artifact?: JobArtifact;
+  /** Set when a routine owns the job. The idle queue does not also pick it up. */
+  routineId?: string;
+  /** Set when a workflow step owns the job. The idle queue still picks it up. */
+  workflowId?: string;
+  workflowRunId?: string;
+  /** Index into that workflow's steps. */
+  workflowStep?: number;
+  handedTo?: string;
+  handedFrom?: string;
+  sourceJobId?: string;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+export type WorkLogKind = 'picked-up' | 'blocked' | 'handed-off' | 'finished' | 'artifact' | 'note';
+
+export interface WorkLogEntry {
+  id: string;
+  jobId: string;
+  botId: string;
+  kind: WorkLogKind;
+  text: string;
+  at: number;
+}
 
 export interface Routine {
   id: string;
   name: string;
   prompt: string;
   botId: string;
+  /** When set, a due run resumes this job instead of sending the prompt on its own. */
+  jobId?: string;
   runOn: 'harnessbot' | 'cloud';
   enabled: boolean;
   schedule: RoutineSchedule;
@@ -349,6 +466,10 @@ export interface Routine {
   attachments?: { name: string; mime: string; data: string }[];
   sourceThreadId?: string;
   nextRunAt: number | null;
+  /** USD. Absent means this routine is not capped. */
+  spendCapUsd?: number;
+  /** Spend the user has explicitly allowed. Below this, a cap does not block. */
+  spendConfirmedUsd?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -449,6 +570,9 @@ export interface McpServerRecord {
   headers?: Record<string, string>;
 }
 
+/** Who started the turn that asked. A routine or a handoff is nobody watching. */
+export type InitiatorKind = 'person' | 'routine' | 'handoff' | 'job';
+
 export interface DecisionLogEntry {
   at: number;
   botId: string;
@@ -460,4 +584,83 @@ export interface DecisionLogEntry {
   source: string;
   allowKey?: string;
   approvalScope?: string;
+  initiatorKind?: InitiatorKind;
+  initiatorId?: string;
+  initiatorLabel?: string;
+}
+
+/** One line beside the computer screen. A path and a size, never file contents. */
+export interface ActivityBeat {
+  at: number;
+  tool: string;
+  command?: string;
+  exitCode?: number;
+  path?: string;
+  bytes?: number;
+}
+
+export interface HistoryEntry {
+  threadId: string;
+  title: string;
+  botId?: string;
+  botName?: string;
+  groupId?: string;
+  preview: string;
+  at: number;
+  kind: 'chat' | 'task' | 'room';
+}
+
+/** What a blocked step does. Absent means the run stops. */
+export type WorkflowOnBlocked = 'stop' | 'continue';
+
+/** One step of a workflow. The next step is a new job, handed across when the bot changes. */
+export interface WorkflowStep {
+  id: string;
+  botId: string;
+  title: string;
+  outcome: string;
+  acceptance: string;
+  /** When this step reports blocked. Absent means the run stops. */
+  onBlocked?: WorkflowOnBlocked;
+}
+
+/** What one step handed to the rest of the run. Paths and labels only, never file contents. */
+export interface WorkflowStepResult {
+  index: number;
+  stepId: string;
+  botId: string;
+  status: 'done' | 'blocked';
+  progress?: string;
+  artifact?: JobArtifact;
+  at: number;
+}
+
+export interface Workflow {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** Absent means someone has to press Run. */
+  schedule?: RoutineSchedule;
+  nextRunAt: number | null;
+  steps: WorkflowStep[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type WorkflowRunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting';
+
+export interface WorkflowRun {
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  status: WorkflowRunStatus;
+  stepIndex: number;
+  jobId?: string;
+  startedAt: number;
+  finishedAt?: number;
+  note?: string;
+  /** Text supplied when Run was pressed. The first step reads it. */
+  input?: string;
+  /** Each finished step, in order, including a blocked one. */
+  results?: WorkflowStepResult[];
 }
